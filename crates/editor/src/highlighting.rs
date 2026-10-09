@@ -18,7 +18,12 @@ pub(crate) struct SyntaxState {
     id: LanguageId,
     /// Loaded (query compiled) on the first background parse.
     language: Option<Arc<Language>>,
+    /// Only kept while the editor is on screen: trees take many times the
+    /// file's size, so hidden tabs drop theirs and parse again when shown.
     tree: Option<Tree>,
+    /// The editor has rendered since the tree was last released, so the tree
+    /// is wanted and kept up to date.
+    shown: bool,
     /// The tree no longer matches the text and can't be reused incrementally
     /// (after undo/redo). It is still drawn until the next parse lands.
     tree_stale: bool,
@@ -30,7 +35,7 @@ pub(crate) struct SyntaxState {
 }
 
 impl Editor {
-    pub(crate) fn init_syntax(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn init_syntax(&mut self) {
         let Some(id) = self
             .path()
             .or(self.language_hint.as_deref())
@@ -46,12 +51,56 @@ impl Editor {
             id,
             language: None,
             tree: None,
+            shown: false,
             tree_stale: false,
             edits_during_parse: Vec::new(),
             reset_during_parse: false,
             parse_task: None,
         });
-        self.schedule_parse(cx);
+        // Parsed on the first render (see `ensure_syntax_tree`): tabs opened
+        // in the background, such as a restored session's, wait until shown.
+    }
+
+    /// Call on render: parses if the tree was never built or was released.
+    pub(crate) fn ensure_syntax_tree(&mut self, cx: &mut Context<Self>) {
+        let Some(syntax) = &mut self.syntax else {
+            return;
+        };
+        if syntax.shown {
+            return;
+        }
+        syntax.shown = true;
+        if syntax.tree.is_none() {
+            self.schedule_parse(cx);
+        }
+    }
+
+    /// Whether this editor (or a side of its split diff) holds a syntax tree
+    /// or is building one.
+    pub fn holds_syntax_tree(&self, cx: &gpui::App) -> bool {
+        self.syntax.as_ref().is_some_and(|syntax| syntax.shown)
+            || self.split.as_ref().is_some_and(|split| {
+                split.left.read(cx).holds_syntax_tree(cx)
+                    || split.right.read(cx).holds_syntax_tree(cx)
+            })
+    }
+
+    /// Drops the syntax tree of an editor that isn't on screen. It's parsed
+    /// again on the next render.
+    pub fn release_syntax_tree(&mut self, cx: &mut Context<Self>) {
+        if let Some(syntax) = &mut self.syntax {
+            syntax.shown = false;
+            syntax.tree = None;
+            syntax.tree_stale = false;
+            syntax.parse_task = None;
+            syntax.edits_during_parse = Vec::new();
+            syntax.reset_during_parse = false;
+        }
+        if let Some(split) = &self.split {
+            for side in [split.left.clone(), split.right.clone()] {
+                side.update(cx, |side, cx| side.release_syntax_tree(cx));
+            }
+        }
     }
 
     pub fn language_name(&self) -> Option<&'static str> {
@@ -66,6 +115,10 @@ impl Editor {
             return;
         };
         if batch.edits.is_empty() && !batch.reset {
+            return;
+        }
+        // Hidden: there's no tree to keep in step; the next render parses.
+        if !syntax.shown {
             return;
         }
         let parsing = syntax.parse_task.is_some();

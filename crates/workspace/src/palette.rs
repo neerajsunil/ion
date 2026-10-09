@@ -204,7 +204,7 @@ impl Palette {
             .filter(|narrowed| fuzzy::narrows(&narrowed.0, &query));
         let count = narrowed
             .as_ref()
-            .map_or(index.files.len(), |narrowed| narrowed.1.len());
+            .map_or(index.len(), |narrowed| narrowed.1.len());
         if wait || count <= MAX_FILES_MATCHED_INLINE {
             let (files, narrowed) = match_files(&index, &recent, narrowed.as_deref(), &query);
             self.narrowed = narrowed.map(Arc::new);
@@ -252,7 +252,7 @@ impl Palette {
                         .position
                         .map(|(line, column)| (line.max(1) - 1, column.unwrap_or(1).max(1) - 1));
                     cx.emit(PaletteEvent::OpenFile(
-                        index.absolute(&index.files[*file]),
+                        index.absolute(&index.file(*file)),
                         position,
                     ));
                 }
@@ -289,7 +289,7 @@ impl Palette {
                 Some(match self.choices.get(ix)? {
                     Choice::File(ix) => {
                         let label = self.recent_entry(*ix).and_then(|entry| entry.label);
-                        let file = &self.index.as_ref()?.files[*ix];
+                        let file = self.index.as_ref()?.file(*ix);
                         let dir = file.path[..file.name_start]
                             .trim_end_matches('/')
                             .to_owned();
@@ -365,12 +365,12 @@ fn match_files(
     let only = narrowed.map(|(_, files)| files);
     let file_at = |position: usize| only.map_or(position, |files| files[position]);
     let by_recency = query.trim().is_empty();
-    let count = only.map_or(index.files.len(), Vec::len);
+    let count = only.map_or(index.len(), Vec::len);
     let candidates = (0..count).map(|position| {
         let ix = file_at(position);
-        let file = &index.files[ix];
+        let file = index.file(ix);
         fuzzy::Candidate {
-            path_lower: &file.path_lower,
+            path_lower: file.path_lower,
             name_start: file.name_start,
             recent: recent_entry(recent, ix).map(|entry| {
                 if by_recency {

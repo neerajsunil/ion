@@ -3036,6 +3036,7 @@ dependencies = [
 name = "ion_text"
 version = "0.3.0"
 dependencies = [
+ "lz4_flex",
  "ropey",
 ]
 

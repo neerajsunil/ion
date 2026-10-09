@@ -97,8 +97,21 @@ Rules:
 
 - Only the visible lines are shaped and laid out.
 - Directories in the file tree load when they're expanded.
-- The file index is a string arena plus offsets, not one `PathBuf` per file.
-- Closing a tab drops its buffer. Background tabs keep only their rope.
+- The file index is one string arena plus a 16-byte entry per file, not one
+  `PathBuf` per file. Lowercase copies are stored only for paths with
+  uppercase letters.
+- Closing a tab drops its buffer, its diff base and its blame.
+- Syntax trees (many times the file's size) exist only for tabs on screen:
+  a tab parses on its first render, and drops its tree when it's no longer
+  its pane's active tab. Restored sessions parse only the tabs they show.
+- A tab hidden for 30 seconds keeps its text and its HEAD text (git gutter)
+  lz4-compressed (`text::Packed`, about 2.7x smaller for source). Reads
+  decompress on demand; showing the tab decompresses it. Tabs with undo
+  history keep their text as is, since the undo snapshots share it.
+- Image tabs decode their image only while shown.
+- The file tree keeps listings only for expanded folders.
+- Nothing is cached "in case": hold data while it's visible or in use, and
+  rebuild it when it's needed again.
 
 ## Platforms
 

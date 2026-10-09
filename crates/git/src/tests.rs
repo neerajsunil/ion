@@ -25,7 +25,7 @@ fn scratch_repo(name: &str) -> (PathBuf, Repository) {
 #[test]
 fn status_stage_commit_and_history() {
     let (dir, repo) = scratch_repo("flow");
-    assert!(repo.log(0, 10).unwrap().is_empty());
+    assert!(repo.log(None, 0, 10).unwrap().is_empty());
 
     fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
     let status = repo.status().unwrap();
@@ -56,9 +56,12 @@ fn status_stage_commit_and_history() {
     repo.discard(&["a.txt"]).unwrap();
     assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "one\ntwo\n");
 
-    let log = repo.log(0, 10).unwrap();
+    let log = repo.log(None, 0, 10).unwrap();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].subject, "First commit");
+    assert!(log[0].parents.is_empty());
+    // A missing upstream is skipped rather than failing.
+    assert_eq!(repo.log(Some("origin/gone"), 0, 10).unwrap().len(), 1);
     let details = repo.commit_details(&log[0].oid).unwrap();
     assert_eq!(details.message, "First commit\n\nWith a body.");
     assert_eq!(details.files[0].path(), "a.txt");

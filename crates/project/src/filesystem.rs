@@ -250,8 +250,8 @@ mod tests {
         let root = PathBuf::from("/project");
         let index = FileIndex::from_paths(root, ["b.rs", "a.rs", "src/c.rs"].map(String::from));
         let next = index.with_changes(vec!["src/d.rs".into(), "0.rs".into()], &["b.rs".into()]);
-        let paths: Vec<&str> = next.files.iter().map(|file| &*file.path).collect();
+        let paths: Vec<&str> = next.files().map(|file| file.path).collect();
         assert_eq!(paths, ["0.rs", "a.rs", "src/c.rs", "src/d.rs"]);
-        assert_eq!(next.files[3].name(), "d.rs");
+        assert_eq!(next.file(3).name(), "d.rs");
     }
 }

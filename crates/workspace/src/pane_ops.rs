@@ -588,6 +588,7 @@ impl Workspace {
     ) -> Option<Item> {
         let item = self.take_item(pane, ix)?;
         self.forget_item(item.id(), cx);
+        self.prune_git_caches(cx);
         // Ctrl+Shift+T brings it back.
         if let ItemKind::Editor { editor, diff: None } = &item.kind
             && let Some(path) = editor.read(cx).path()

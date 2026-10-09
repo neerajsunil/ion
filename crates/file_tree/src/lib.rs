@@ -289,6 +289,7 @@ impl FileTree {
     /// Collapses every folder.
     pub fn collapse_all(&mut self, cx: &mut Context<Self>) {
         self.expanded.retain(|dir| *dir == self.root);
+        self.children.retain(|dir, _| *dir == self.root);
         self.rebuild_rows();
         cx.notify();
     }
@@ -307,6 +308,8 @@ impl FileTree {
                 this.update(cx, |this, cx| {
                     this.loads.remove(&dir);
                     match entries {
+                        // Collapsed while loading: not needed any more.
+                        Ok(_) if !this.is_shown(&dir) => {}
                         Ok(entries) => {
                             this.children.insert(dir.clone(), entries);
                         }
@@ -326,17 +329,38 @@ impl FileTree {
         self.loads.insert(dir, task);
     }
 
+    /// Expands `dir`, and reads it and the folders under it that were open
+    /// when it was collapsed.
     fn expand(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        if !self.children.contains_key(&dir) {
-            self.load(&dir, cx);
+        self.expanded.insert(dir.clone());
+        let reopened: Vec<PathBuf> = self
+            .expanded
+            .iter()
+            .filter(|open| open.starts_with(&dir) && !self.children.contains_key(*open))
+            .filter(|open| self.is_shown(open))
+            .cloned()
+            .collect();
+        for open in reopened {
+            self.load(&open, cx);
         }
-        self.expanded.insert(dir);
         self.rebuild_rows();
     }
 
+    /// Collapses `dir` and forgets the listings under it (they're read again
+    /// when it's expanded). Which folders inside were open is remembered.
     fn collapse(&mut self, dir: &Path) {
         self.expanded.remove(dir);
+        self.children.retain(|listed, _| !listed.starts_with(dir));
+        self.loads.retain(|loading, _| !loading.starts_with(dir));
         self.rebuild_rows();
+    }
+
+    /// Whether `dir` and every folder above it up to the root are expanded,
+    /// so its entries are drawn.
+    fn is_shown(&self, dir: &Path) -> bool {
+        dir.ancestors()
+            .take_while(|ancestor| ancestor.starts_with(&self.root))
+            .all(|ancestor| self.expanded.contains(ancestor))
     }
 
     /// Flattens the expanded part of the tree into the rows that are drawn.

@@ -299,6 +299,21 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Forgets diff bases and blame of editors that were closed.
+    pub(crate) fn prune_git_caches(&mut self, cx: &mut Context<Self>) {
+        let editors = self.editors();
+        let Some(git) = &mut self.git else {
+            return;
+        };
+        git.bases
+            .retain(|id, _| editors.iter().any(|editor| editor.entity_id() == *id));
+        git.blame.retain(|path, _| {
+            editors
+                .iter()
+                .any(|editor| editor.read(cx).path() == Some(path.as_path()))
+        });
+    }
+
     /// Reads the file's committed text for the editor's change markers, if
     /// it hasn't been read at the current HEAD yet.
     pub(crate) fn load_diff_base(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {

@@ -229,12 +229,7 @@ fn ssh_project_round_trip() {
         2
     );
     let index = filesystem.build_index(&root, None, &|_| {}).unwrap();
-    assert!(
-        index
-            .files
-            .iter()
-            .any(|file| file.path.as_ref() == "src/renamed.rs")
-    );
+    assert!(index.files().any(|file| file.path == "src/renamed.rs"));
     // A rebuild fetches only the changes and applies them to the last list.
     let added = join_path(&root, "src/added.rs");
     filesystem.create_file(&added).unwrap();
@@ -242,12 +237,8 @@ fn ssh_project_round_trip() {
         .build_index(&root, Some(&index), &|_| {})
         .unwrap();
     assert_ne!(next.version, index.version);
-    assert_eq!(next.files.len(), index.files.len() + 1);
-    assert!(
-        next.files
-            .iter()
-            .any(|file| file.path.as_ref() == "src/added.rs")
-    );
+    assert_eq!(next.len(), index.len() + 1);
+    assert!(next.files().any(|file| file.path == "src/added.rs"));
     let src = join_path(&root, "src");
     assert_eq!(
         filesystem

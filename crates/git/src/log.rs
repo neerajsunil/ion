@@ -12,6 +12,38 @@ pub struct CommitSummary {
     pub subject: String,
     /// Branch and tag names pointing here, e.g. "HEAD -> main, origin/main".
     pub refs: String,
+    pub parents: Vec<String>,
+}
+
+impl CommitSummary {
+    /// The names in `refs`.
+    pub fn ref_names(&self) -> impl Iterator<Item = RefName<'_>> {
+        self.refs
+            .split(", ")
+            .filter(|name| !name.is_empty())
+            .flat_map(|name| match name.strip_prefix("HEAD -> ") {
+                Some(branch) => [Some(RefName::Head), Some(RefName::Branch(branch))],
+                None if name == "HEAD" => [Some(RefName::Head), None],
+                None => [
+                    Some(match name.strip_prefix("tag: ") {
+                        Some(tag) => RefName::Tag(tag),
+                        None => RefName::Branch(name),
+                    }),
+                    None,
+                ],
+            })
+            .flatten()
+    }
+}
+
+/// A name in a commit's `refs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefName<'a> {
+    /// HEAD points here (checked out).
+    Head,
+    /// A local or remote-tracking branch, e.g. "main" or "origin/main".
+    Branch(&'a str),
+    Tag(&'a str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,7 +60,7 @@ pub struct CommitDetails {
 const FIELD: char = '\x1f';
 const RECORD: char = '\x1e';
 
-pub(crate) const LOG_FORMAT: &str = "--format=%H%x1f%h%x1f%an%x1f%at%x1f%s%x1f%D%x1e";
+pub(crate) const LOG_FORMAT: &str = "--format=%H%x1f%h%x1f%an%x1f%at%x1f%s%x1f%D%x1f%P%x1e";
 pub(crate) const SHOW_FORMAT: &str = "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%B%x1e";
 
 pub(crate) fn parse_log(output: &str) -> Vec<CommitSummary> {
@@ -43,6 +75,12 @@ pub(crate) fn parse_log(output: &str) -> Vec<CommitSummary> {
                 time: fields.next()?.parse().unwrap_or(0),
                 subject: fields.next()?.to_owned(),
                 refs: fields.next().unwrap_or("").trim().to_owned(),
+                parents: fields
+                    .next()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect(),
             })
         })
         .collect()
@@ -99,11 +137,22 @@ mod tests {
 
     #[test]
     fn parses_log_records() {
-        let output = "aaa\x1fa1\x1fAda\x1f100\x1fFirst\x1fHEAD -> main\x1e\n\
-                      bbb\x1fb2\x1fGrace\x1f50\x1fSecond\x1f\x1e\n";
+        let output = "aaa\x1fa1\x1fAda\x1f100\x1fFirst\x1fHEAD -> main, origin/main, tag: v1\x1fbbb ccc\x1e\n\
+                      bbb\x1fb2\x1fGrace\x1f50\x1fSecond\x1f\x1f\x1e\n";
         let commits = parse_log(output);
         assert_eq!(commits.len(), 2);
-        assert_eq!(commits[0].refs, "HEAD -> main");
+        assert_eq!(commits[0].parents, ["bbb", "ccc"]);
+        assert!(commits[1].parents.is_empty());
+        assert_eq!(
+            commits[0].ref_names().collect::<Vec<_>>(),
+            [
+                RefName::Head,
+                RefName::Branch("main"),
+                RefName::Branch("origin/main"),
+                RefName::Tag("v1"),
+            ]
+        );
+        assert_eq!(commits[1].ref_names().count(), 0);
         assert_eq!(commits[1].author, "Grace");
         assert_eq!(commits[1].time, 50);
     }

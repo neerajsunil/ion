@@ -159,12 +159,23 @@ impl Repository {
         Ok(blame::parse(&output))
     }
 
-    /// Up to `limit` commits reachable from HEAD, newest first, skipping
-    /// the first `skip`.
-    pub fn log(&self, skip: usize, limit: usize) -> Result<Vec<CommitSummary>> {
+    /// Up to `limit` commits reachable from HEAD (and `upstream`, when
+    /// given), newest first with children before parents, skipping the
+    /// first `skip`.
+    pub fn log(
+        &self,
+        upstream: Option<&str>,
+        skip: usize,
+        limit: usize,
+    ) -> Result<Vec<CommitSummary>> {
         let skip = format!("--skip={skip}");
         let limit = format!("--max-count={limit}");
-        match self.run_text(&["log", log::LOG_FORMAT, &skip, &limit]) {
+        let mut args = vec!["log", log::LOG_FORMAT, "--topo-order", &skip, &limit];
+        if let Some(upstream) = upstream {
+            // An upstream that's gone from the remote is left out.
+            args.extend(["--ignore-missing", "HEAD", upstream]);
+        }
+        match self.run_text(&args) {
             Ok(output) => Ok(log::parse_log(&output)),
             // No commits yet.
             Err(GitError::Failed(message)) if message.contains("does not have any commits") => {

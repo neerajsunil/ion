@@ -630,7 +630,13 @@ impl Element for EditorElement {
             line_height,
             lines,
         };
-        let partner = self.editor.update(cx, |editor, _| {
+        let partner = self.editor.update(cx, |editor, cx| {
+            // Revert buttons are placed in render from the scroll it saw;
+            // re-render if autoscroll or clamping moved it since.
+            let has_buttons = editor.git_diff.is_some() || !editor.revert_rows.is_empty();
+            if has_buttons && editor.scroll.y != scroll.y {
+                cx.notify();
+            }
             editor.scroll = scroll;
             editor.autoscroll = false;
             editor.scroll_partner.clone()

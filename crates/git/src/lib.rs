@@ -6,6 +6,7 @@
 
 mod blame;
 mod cmd;
+mod graph;
 mod line_diff;
 mod log;
 mod patch;
@@ -16,8 +17,9 @@ mod text_diff;
 
 pub use blame::{Blame, BlameCommit};
 pub use cmd::{GitError, Result};
+pub use graph::{Edge, Graph, GraphRow, Span};
 pub use line_diff::{LineChange, LineHunk, base_row, diff_lines};
-pub use log::{CommitDetails, CommitSummary, now, relative_time};
+pub use log::{CommitDetails, CommitSummary, RefName, now, relative_time};
 pub use patch::{DiffLine, FileDiff, Hunk, LineKind};
 pub use repo::Repository;
 pub use revert::{Revert, replace_lines};

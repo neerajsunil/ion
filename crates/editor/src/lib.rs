@@ -6,6 +6,7 @@ mod editor;
 mod element;
 mod folding;
 mod git_gutter;
+mod hidden;
 mod highlighting;
 mod input;
 mod layout;

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use git::LineHunk;
 use gpui::{AppContext, Context, Task};
+use text::Packed;
 
 use crate::Editor;
 
@@ -14,8 +15,8 @@ const DIFF_DELAY: Duration = Duration::from_millis(120);
 const MAX_DIFF_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) struct GitDiffState {
-    /// The file's text at HEAD.
-    base: Arc<str>,
+    /// The file's text at HEAD, compressed while the tab is hidden.
+    pub(crate) base: Packed<Arc<str>>,
     /// Changed regions, sorted, for the text at `version`.
     pub(crate) hunks: Arc<[LineHunk]>,
     version: Option<u64>,
@@ -45,12 +46,12 @@ impl Editor {
         if self
             .git_diff
             .as_ref()
-            .is_some_and(|state| &*state.base == base)
+            .is_some_and(|state| &**state.base == base)
         {
             return;
         }
         self.git_diff = Some(GitDiffState {
-            base: base.into(),
+            base: Packed::new(base.into()),
             hunks: Arc::from([]),
             version: None,
             task: None,
@@ -80,7 +81,7 @@ impl Editor {
             let Ok(Some((base, rope, version))) = this.update(cx, |editor, _| {
                 let state = editor.git_diff.as_ref()?;
                 let rope = editor.buffer.rope().clone();
-                Some((state.base.clone(), rope, editor.buffer.version()))
+                Some(((*state.base).clone(), rope, editor.buffer.version()))
             }) else {
                 return;
             };

@@ -12,38 +12,49 @@ const MAX_FILES: usize = 500_000;
 /// How often indexing reports how many files it has found.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
-#[derive(Clone)]
-pub struct IndexedFile {
+/// A file in the index, borrowed from it.
+#[derive(Clone, Copy)]
+pub struct IndexedFile<'a> {
     /// Path relative to the root, with `/` separators.
-    pub path: Box<str>,
+    pub path: &'a str,
     /// Lowercased `path`, for case-insensitive matching.
-    pub path_lower: Box<str>,
+    pub path_lower: &'a str,
     /// Byte offset where the file name starts in `path`.
     pub name_start: usize,
 }
 
-impl IndexedFile {
-    fn new(path: String) -> Self {
-        Self {
-            name_start: path.rfind('/').map_or(0, |slash| slash + 1),
-            path_lower: path.to_lowercase().into(),
-            path: path.into(),
-        }
-    }
-
-    pub fn name(&self) -> &str {
+impl<'a> IndexedFile<'a> {
+    pub fn name(&self) -> &'a str {
         &self.path[self.name_start..]
     }
 
-    pub fn name_lower(&self) -> &str {
-        &self.path_lower[self.name_start..]
+    pub fn name_lower(&self) -> &'a str {
+        let start = self.path_lower.rfind('/').map_or(0, |slash| slash + 1);
+        &self.path_lower[start..]
     }
 }
 
-/// Every file in the project, honoring `.gitignore`.
+/// Where one file's strings are in the arenas.
+#[derive(Clone, Copy)]
+struct Entry {
+    path: u32,
+    /// In `lower`, or [`SAME_LOWER`] when the path has no uppercase.
+    lower: u32,
+    path_len: u16,
+    lower_len: u16,
+    name_start: u16,
+}
+
+const SAME_LOWER: u32 = u32::MAX;
+
+/// Every file in the project, honoring `.gitignore`. Paths live in one
+/// string (lowercase copies only for paths that need one), so a large
+/// repository costs little more than its path bytes.
 pub struct FileIndex {
     pub root: PathBuf,
-    pub files: Vec<IndexedFile>,
+    paths: String,
+    lower: String,
+    entries: Box<[Entry]>,
     /// Positions in `files`, in the order project search scans them: source
     /// code, then other text, then everything else (see [`Tier`]).
     pub search_order: Box<[u32]>,
@@ -170,47 +181,115 @@ impl FileIndex {
     }
 
     pub fn from_paths(root: PathBuf, paths: impl IntoIterator<Item = String>) -> Self {
-        Self::from_files(root, paths.into_iter().map(IndexedFile::new).collect())
+        let paths: Vec<String> = paths.into_iter().collect();
+        Self::from_sorted(root, paths.iter().map(String::as_str).collect())
     }
 
-    fn from_files(root: PathBuf, mut files: Vec<IndexedFile>) -> Self {
+    /// Builds the arenas from `paths`, sorting and deduplicating them first.
+    fn from_sorted(root: PathBuf, mut paths: Vec<&str>) -> Self {
         // Stable: mostly sorted input (an update) sorts in about one pass.
-        files.sort_by(|a, b| a.path.cmp(&b.path));
-        files.dedup_by(|a, b| a.path == b.path);
-        files.truncate(MAX_FILES);
-        let mut search_order: Box<[u32]> = (0..files.len() as u32).collect();
-        // Stable, so each tier stays in path order.
-        search_order.sort_by_cached_key(|&ix| Tier::of(files[ix as usize].name()));
-        Self {
-            root,
-            files,
-            search_order,
-            version: None,
+        paths.sort();
+        paths.dedup();
+        // Longer paths than an entry can describe aren't real files.
+        paths.retain(|path| path.len() <= u16::MAX as usize);
+        paths.truncate(MAX_FILES);
+        let mut arena = String::with_capacity(paths.iter().map(|path| path.len()).sum());
+        let mut lower = String::new();
+        let mut entries = Vec::with_capacity(paths.len());
+        for path in &paths {
+            let lowered = path.to_lowercase();
+            let lower_start = if lowered == *path || lowered.len() > u16::MAX as usize {
+                SAME_LOWER
+            } else {
+                let start = lower.len() as u32;
+                lower.push_str(&lowered);
+                start
+            };
+            entries.push(Entry {
+                path: arena.len() as u32,
+                lower: lower_start,
+                path_len: path.len() as u16,
+                lower_len: if lower_start == SAME_LOWER {
+                    0
+                } else {
+                    lowered.len() as u16
+                },
+                name_start: path.rfind('/').map_or(0, |slash| slash + 1) as u16,
+            });
+            arena.push_str(path);
         }
+        lower.shrink_to_fit();
+        let mut index = Self {
+            root,
+            paths: arena,
+            lower,
+            entries: entries.into(),
+            search_order: Box::new([]),
+            version: None,
+        };
+        let mut search_order: Box<[u32]> = (0..index.len() as u32).collect();
+        // Stable, so each tier stays in path order.
+        search_order.sort_by_cached_key(|&ix| Tier::of(index.file(ix as usize).name()));
+        index.search_order = search_order;
+        index
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The file at `ix`, in path order.
+    pub fn file(&self, ix: usize) -> IndexedFile<'_> {
+        let entry = self.entries[ix];
+        let path = &self.paths[entry.path as usize..][..entry.path_len as usize];
+        let path_lower = if entry.lower == SAME_LOWER {
+            path
+        } else {
+            &self.lower[entry.lower as usize..][..entry.lower_len as usize]
+        };
+        IndexedFile {
+            path,
+            path_lower,
+            name_start: entry.name_start as usize,
+        }
+    }
+
+    /// Every file, in path order.
+    pub fn files(&self) -> impl ExactSizeIterator<Item = IndexedFile<'_>> + '_ {
+        (0..self.len()).map(|ix| self.file(ix))
     }
 
     /// Where `path` (absolute) is in `files`.
     pub fn position(&self, path: &Path) -> Option<usize> {
         let relative = path.strip_prefix(&self.root).ok()?;
         let relative = relative.to_string_lossy().replace('\\', "/");
-        self.files
-            .binary_search_by(|file| (*file.path).cmp(relative.as_str()))
-            .ok()
+        let mut lo = 0;
+        let mut hi = self.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match self.file(mid).path.cmp(relative.as_str()) {
+                std::cmp::Ordering::Equal => return Some(mid),
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+            }
+        }
+        None
     }
 
     /// This list with `removed` taken out and `added` put in.
     pub fn with_changes(&self, added: Vec<String>, removed: &[String]) -> Self {
         let removed: HashSet<&str> = removed.iter().map(String::as_str).collect();
-        let kept = self
-            .files
-            .iter()
-            .filter(|file| !removed.contains(&*file.path))
-            .cloned();
-        Self::from_files(
-            self.root.clone(),
-            kept.chain(added.into_iter().map(IndexedFile::new))
-                .collect(),
-        )
+        let paths = self
+            .files()
+            .map(|file| file.path)
+            .filter(|path| !removed.contains(path))
+            .chain(added.iter().map(String::as_str))
+            .collect();
+        Self::from_sorted(self.root.clone(), paths)
     }
 
     /// This list after files or folders at `changed` (absolute paths the
@@ -244,26 +323,25 @@ impl FileIndex {
                     .match_indices('/')
                     .any(|(slash, _)| gone.contains(&path[..slash]))
         };
-        let kept = self
-            .files
-            .iter()
-            .filter(|file| !is_gone(&file.path))
-            .cloned();
-        let added = added.into_iter().filter_map(|path| {
-            let relative = path.strip_prefix(&self.root).ok()?;
-            Some(IndexedFile::new(
-                relative.to_string_lossy().replace('\\', "/"),
-            ))
-        });
-        Some(Self::from_files(
-            self.root.clone(),
-            kept.chain(added).collect(),
-        ))
+        let added: Vec<String> = added
+            .into_iter()
+            .filter_map(|path| {
+                let relative = path.strip_prefix(&self.root).ok()?;
+                Some(relative.to_string_lossy().replace('\\', "/"))
+            })
+            .collect();
+        let paths = self
+            .files()
+            .map(|file| file.path)
+            .filter(|path| !is_gone(path))
+            .chain(added.iter().map(String::as_str))
+            .collect();
+        Some(Self::from_sorted(self.root.clone(), paths))
     }
 
     pub fn absolute(&self, file: &IndexedFile) -> PathBuf {
         // Index paths use `/`; give back native separators.
-        crate::join_path(&self.root, &file.path)
+        crate::join_path(&self.root, file.path)
     }
 }
 
@@ -309,7 +387,7 @@ mod tests {
         let order: Vec<&str> = index
             .search_order
             .iter()
-            .map(|&ix| &*index.files[ix as usize].path)
+            .map(|&ix| index.file(ix as usize).path)
             .collect();
         assert_eq!(order, ["c/d.py", "z.rs", "Makefile", "a.md", "b.png"]);
         assert_eq!(index.position(Path::new("/p/z.rs")), Some(4));
@@ -326,7 +404,7 @@ mod tests {
             std::fs::write(root.join(file), "").unwrap();
         }
         let index = FileIndex::build(&root);
-        assert_eq!(index.files.len(), 4);
+        assert_eq!(index.len(), 4);
 
         // A folder renamed, a file deleted, a file created.
         std::fs::rename(root.join("old"), root.join("new")).unwrap();
@@ -334,9 +412,9 @@ mod tests {
         std::fs::write(root.join("src/c.rs"), "").unwrap();
         let changed = ["old", "new", "a.rs", "src/c.rs"].map(|path| root.join(path));
         let next = index.updated(&changed).unwrap();
-        let paths: Vec<&str> = next.files.iter().map(|file| &*file.path).collect();
+        let paths: Vec<&str> = next.files().map(|file| file.path).collect();
         assert_eq!(paths, ["new/x.rs", "new/y.rs", "src/b.rs", "src/c.rs"]);
-        assert_eq!(next.files[3].name(), "c.rs");
+        assert_eq!(next.file(3).name(), "c.rs");
         assert_eq!(next.search_order.len(), 4);
         assert!(index.updated(std::slice::from_ref(&root)).is_none());
         std::fs::remove_dir_all(root).unwrap();

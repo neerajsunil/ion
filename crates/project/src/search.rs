@@ -171,8 +171,8 @@ pub fn search_streaming(
                     let Some(&ix) = order.get(position) else {
                         return;
                     };
-                    let file = &index.files[ix as usize];
-                    let absolute = index.absolute(file);
+                    let file = index.file(ix as usize);
+                    let absolute = index.absolute(&file);
                     let lines = match buffers.binary_search_by_key(&(ix as usize), |(ix, _)| *ix) {
                         Ok(buffer) => search_text(buffers[buffer].1, &regex),
                         Err(_) => search_file(&absolute, &regex),
@@ -441,7 +441,7 @@ mod tests {
         std::fs::write(dir.join("src/a.rs"), "fn alpha() {}\nfn Beta() {}\n").unwrap();
         std::fs::write(dir.join("b.txt"), "nothing here").unwrap();
         let index = FileIndex::build(&dir);
-        assert_eq!(index.files.len(), 2);
+        assert_eq!(index.len(), 2);
         let results = search(&index, "beta", false, &AtomicBool::new(false));
         assert_eq!(results.files.len(), 1);
         assert_eq!(results.files[0].path, "src/a.rs");

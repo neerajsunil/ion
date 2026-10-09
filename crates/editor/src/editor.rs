@@ -116,6 +116,8 @@ pub struct Editor {
     /// Hash of the file as Ion last loaded or saved it; see
     /// [`Editor::matches_disk`].
     disk_hash: Option<u64>,
+    /// Compresses the text of a tab that stays hidden (see `hidden.rs`).
+    pub(crate) pack_task: Option<Task<()>>,
 }
 
 impl EventEmitter<EditorEvent> for Editor {}
@@ -161,8 +163,9 @@ impl Editor {
             syntax: None,
             search: None,
             disk_hash: None,
+            pack_task: None,
         };
-        editor.init_syntax(cx);
+        editor.init_syntax();
         editor
     }
 
@@ -213,7 +216,7 @@ impl Editor {
         editor.title = Some(title.into());
         editor.diff_rows = Some(rows.into());
         editor.language_hint = language_hint;
-        editor.init_syntax(cx);
+        editor.init_syntax();
         editor
     }
 
@@ -233,7 +236,7 @@ impl Editor {
         self.set_diff_content(text, rows, cx);
         if relanguage {
             self.syntax = None;
-            self.init_syntax(cx);
+            self.init_syntax();
         }
     }
 
@@ -248,6 +251,7 @@ impl Editor {
             self.buffer.mark_saved();
             self.text_changed(cx);
             self.scroll = scroll;
+            self.clamp_scroll();
         }
         self.refresh_split(cx);
         cx.notify();
@@ -287,7 +291,7 @@ impl Editor {
         self.path = Some(path);
         if language_changed {
             self.syntax = None;
-            self.init_syntax(cx);
+            self.init_syntax();
         }
         cx.notify();
     }
@@ -1100,8 +1104,32 @@ impl Editor {
         };
         self.scroll -= delta;
         self.autoscroll = false;
+        self.clamp_scroll();
+        // Keep the other side of a side-by-side diff in step this frame
+        // rather than one late, so its rows and buttons don't trail.
+        if let Some(partner) = self.scroll_partner.as_ref().and_then(|p| p.upgrade()) {
+            let y = self.scroll.y;
+            partner.update(cx, |partner, cx| {
+                if partner.scroll.y != y {
+                    partner.scroll.y = y;
+                    partner.autoscroll = false;
+                    partner.clamp_scroll();
+                    cx.notify();
+                }
+            });
+        }
         cx.notify();
         cx.stop_propagation();
+    }
+
+    /// Clamps `scroll` as prepaint will. Revert buttons and hit tests read it
+    /// before the next prepaint, so an overscrolled value makes them jump.
+    pub(crate) fn clamp_scroll(&mut self) {
+        let line_height = theme::editor_line_height();
+        let rows = self.wrap.row_count(self.buffer.line_count());
+        let max_y = line_height * rows.saturating_sub(1) as f32;
+        self.scroll.y = self.scroll.y.clamp(px(0.), max_y);
+        self.scroll.x = self.scroll.x.max(px(0.));
     }
 }
 
@@ -1122,6 +1150,7 @@ fn common_suffix_chars(a: &str, b: &str, prefix: usize) -> usize {
 
 impl Render for Editor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.wake();
         if let Some(split) = &self.split {
             return div()
                 .id("editor")
@@ -1133,6 +1162,7 @@ impl Render for Editor {
                 .child(self.render_split(split))
                 .into_any_element();
         }
+        self.ensure_syntax_tree(cx);
         macro_rules! on {
             ($action:ty, |$b:ident| $body:expr) => {
                 cx.listener(|this, _: &$action, _, cx| {

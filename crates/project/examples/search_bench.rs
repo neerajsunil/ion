@@ -57,9 +57,8 @@ fn main() {
 
     let (median_time, min_time, index) = time(runs, || FileIndex::build(&root));
     let (bytes, searchable) = index
-        .files
-        .iter()
-        .filter_map(|file| std::fs::metadata(index.absolute(file)).ok())
+        .files()
+        .filter_map(|file| std::fs::metadata(index.absolute(&file)).ok())
         .filter(|meta| meta.len() <= 4 * 1024 * 1024)
         .fold((0u64, 0usize), |(bytes, n), meta| {
             (bytes + meta.len(), n + 1)
@@ -67,7 +66,7 @@ fn main() {
     writeln!(
         out,
         "{} files indexed ({searchable} up to 4 MiB, {:.2} GB), {runs} runs, {} threads",
-        index.files.len(),
+        index.len(),
         bytes as f64 / 1e9,
         std::thread::available_parallelism().map_or(0, |n| n.get())
     )

@@ -20,8 +20,9 @@ use crate::file_history::{self, FileUse};
 use crate::find_bar::{FindBar, FindBarEvent};
 use crate::git_panel::{GitPanel, GitPanelEvent};
 use crate::git_state::GitState;
+use crate::image_view::ImageView;
 use crate::palette::{Palette, PaletteEvent, RecentFile};
-use crate::pane::{Axis, Pane, PaneId, PaneNode, Region, Side};
+use crate::pane::{Axis, ItemKind, Pane, PaneId, PaneNode, Region, Side};
 use crate::pane_view::{LayoutBounds, Resize};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent, SearchContext};
 use crate::prompt::{InputPrompt, InputPromptEvent};
@@ -634,9 +635,9 @@ impl Workspace {
             return;
         }
         if matches!(filesystem, FileSystem::Local) && crate::image_view::is_image(&path) {
-            let view = cx.new(|cx| crate::image_view::ImageView::new(path, cx));
+            let view = cx.new(|cx| ImageView::new(path, cx));
             let item = crate::pane::Item {
-                kind: crate::pane::ItemKind::Image(view),
+                kind: ItemKind::Image(view),
                 _subscriptions: Vec::new(),
             };
             let pane = self.file_pane();
@@ -1431,6 +1432,45 @@ impl Workspace {
         )
     }
 
+    /// Background tabs drop what they can rebuild: editors their syntax
+    /// trees (many times the file's size) and, after a while, keep their
+    /// text compressed; image tabs drop their decoded image. All of it comes
+    /// back when the tab is shown. Runs after the frame, so a tab
+    /// switch (which re-renders the workspace) frees the tab it left.
+    fn release_hidden_tabs(&self, cx: &mut Context<Self>) {
+        let shown: Vec<EntityId> = self
+            .panes
+            .values()
+            .filter_map(|pane| pane.active_item().map(|item| item.id()))
+            .collect();
+        let hidden = || {
+            self.panes
+                .values()
+                .flat_map(|pane| &pane.items)
+                .filter(|item| !shown.contains(&item.id()))
+        };
+        let editors: Vec<Entity<Editor>> = hidden()
+            .filter_map(|item| item.editor().cloned())
+            .filter(|editor| editor.read(cx).holds_hidden_state(cx))
+            .collect();
+        let images: Vec<Entity<ImageView>> = hidden()
+            .filter_map(|item| match &item.kind {
+                ItemKind::Image(view) if view.read(cx).holds_image() => Some(view.clone()),
+                _ => None,
+            })
+            .collect();
+        if !editors.is_empty() || !images.is_empty() {
+            cx.defer(move |cx| {
+                for editor in editors {
+                    editor.update(cx, |editor, cx| editor.release_hidden(cx));
+                }
+                for image in images {
+                    image.update(cx, |image, _| image.release_image());
+                }
+            });
+        }
+    }
+
     /// The editor area and terminal dock, or the maximized pane.
     fn render_main(&self, cx: &mut Context<Self>) -> gpui::Div {
         if let Some(pane) = self.zoomed.filter(|pane| self.panes.contains_key(pane)) {
@@ -1503,6 +1543,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.release_hidden_tabs(cx);
         let sidebar_right = settings::get(cx).sidebar_side == settings::Side::Right;
         let sidebar = self
             .file_tree

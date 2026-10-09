@@ -1,6 +1,8 @@
 //! A rope plus a selection and undo history. All offsets are char indices.
 
 use ropey::Rope;
+
+use crate::packed::Packed;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -73,7 +75,9 @@ struct Snapshot {
 }
 
 pub struct Buffer {
-    rope: Rope,
+    /// Compressed while the tab is hidden and has no undo history (see
+    /// [`Buffer::packable`]); reading it decompresses.
+    rope: Packed<Rope>,
     /// The primary selection (the newest cursor).
     pub selection: Selection,
     /// More cursors (Ctrl+D, Alt+click), not overlapping, in no order.
@@ -101,7 +105,7 @@ impl Buffer {
     pub fn new(text: &str) -> Self {
         let line_ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
         Self {
-            rope: Rope::from_str(text),
+            rope: Packed::new(Rope::from_str(text)),
             selection: Selection::default(),
             extra: Vec::new(),
             batch: None,
@@ -147,6 +151,41 @@ impl Buffer {
 
     pub fn rope(&self) -> &Rope {
         &self.rope
+    }
+
+    /// The text to compress for a hidden tab, with the version it's for, if
+    /// it isn't compressed yet. Buffers with undo history are left alone:
+    /// their snapshots share most of the rope, so compressing it frees little.
+    pub fn packable(&self) -> Option<(Rope, u64)> {
+        let idle = self.undo_stack.is_empty() && self.redo_stack.is_empty();
+        (idle && self.rope.is_unpacked() && !self.rope.has_packed())
+            .then(|| ((*self.rope).clone(), self.version))
+    }
+
+    /// Keeps only `packed`, the compressed text, if the text is still at
+    /// `version`. Returns whether it did.
+    pub fn set_packed(&mut self, version: u64, packed: Box<[u8]>) -> bool {
+        let unchanged = version == self.version && self.packable().is_some();
+        if unchanged {
+            self.rope.set_packed(packed);
+        }
+        unchanged
+    }
+
+    /// Drops text decompressed by a read while hidden, if its compressed form
+    /// is still current.
+    pub fn repack(&mut self) -> bool {
+        self.rope.is_unpacked() && self.rope.repack()
+    }
+
+    /// Whether the text is in memory uncompressed and could be packed.
+    pub fn is_unpacked(&self) -> bool {
+        self.rope.is_unpacked() && (self.rope.has_packed() || self.packable().is_some())
+    }
+
+    /// Decompresses the text of a tab that's shown again.
+    pub fn unpack(&mut self) {
+        self.rope.unpack();
     }
 
     pub fn len(&self) -> usize {
@@ -476,7 +515,7 @@ impl Buffer {
             return false;
         };
         self.redo_stack.push(Snapshot {
-            rope: std::mem::replace(&mut self.rope, snapshot.rope),
+            rope: std::mem::replace(&mut *self.rope, snapshot.rope),
             selection: self.selection,
             extra: std::mem::replace(&mut self.extra, snapshot.extra),
             version: self.version,
@@ -495,7 +534,7 @@ impl Buffer {
             return false;
         };
         self.undo_stack.push(Snapshot {
-            rope: std::mem::replace(&mut self.rope, snapshot.rope),
+            rope: std::mem::replace(&mut *self.rope, snapshot.rope),
             selection: self.selection,
             extra: std::mem::replace(&mut self.extra, snapshot.extra),
             version: self.version,
@@ -741,6 +780,25 @@ fn char_class(c: char) -> CharClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_text_reads_edits_and_undoes() {
+        let mut b = Buffer::new("hello\nworld\n");
+        let (rope, version) = b.packable().unwrap();
+        assert!(b.set_packed(version, crate::pack(&rope)));
+        assert!(!b.is_unpacked());
+        assert_eq!(b.line_text(1), "world");
+        assert!(b.repack());
+        b.move_doc_end(false);
+        b.insert("!");
+        assert_eq!(b.text(), "hello\nworld\n!");
+        // With undo history the text stays as it is.
+        assert!(b.packable().is_none());
+        b.undo();
+        assert_eq!(b.text(), "hello\nworld\n");
+        // A stale compression is ignored.
+        assert!(!b.set_packed(version + 100, crate::pack(&rope)));
+    }
 
     #[test]
     fn insert_and_undo() {

@@ -6,12 +6,15 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use editor::Editor;
-use git::{CommitSummary, FileState, Repository, Status, StatusEntry};
+use git::{
+    CommitSummary, FileState, Graph, GraphRow, RefName, Repository, Span, Status, StatusEntry,
+};
 use gpui::{
     AppContext, ClickEvent, ClipboardItem, Context, Div, Entity, EventEmitter, Focusable, Hsla,
     InteractiveElement, IntoElement, KeyBinding, MouseButton, MouseDownEvent, ParentElement,
-    Pixels, Point, PromptLevel, Render, SharedString, Stateful, StatefulInteractiveElement, Styled,
-    Task, UniformListScrollHandle, Window, actions, div, prelude::FluentBuilder, px, uniform_list,
+    PathBuilder, Pixels, Point, PromptLevel, Render, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, Task, UniformListScrollHandle, Window, actions, canvas,
+    div, fill, prelude::FluentBuilder, px, uniform_list,
 };
 use ui::{IconName, MenuEntry};
 
@@ -33,6 +36,10 @@ const CONTEXT: &str = "GitPanel";
 const ROW_HEIGHT: f32 = 22.;
 /// Commits loaded per page of history.
 const HISTORY_PAGE: usize = 200;
+/// Width of one lane in the history graph.
+const LANE_WIDTH: f32 = 11.;
+/// Lanes drawn before the graph is cut off, so it can't crowd out subjects.
+const MAX_LANES: u16 = 6;
 
 pub fn key_bindings() -> Vec<KeyBinding> {
     vec![KeyBinding::new("secondary-enter", Commit, Some(CONTEXT))]
@@ -81,6 +88,12 @@ pub struct GitPanel {
     rows: Vec<Row>,
     collapsed: HashSet<Section>,
     history: Vec<CommitSummary>,
+    /// Graph row for each commit in `history`.
+    graph: Vec<GraphRow>,
+    /// Lane state after the last loaded commit.
+    graph_state: Graph,
+    /// Lanes the loaded graph uses, at most `MAX_LANES`.
+    graph_lanes: u16,
     history_complete: bool,
     history_task: Option<Task<()>>,
     /// A commit or other operation is running.
@@ -116,6 +129,9 @@ impl GitPanel {
             rows: Vec::new(),
             collapsed: HashSet::new(),
             history: Vec::new(),
+            graph: Vec::new(),
+            graph_state: Graph::default(),
+            graph_lanes: 1,
             history_complete: false,
             history_task: None,
             busy: false,
@@ -137,6 +153,10 @@ impl GitPanel {
     }
 
     pub fn set_status(&mut self, status: Arc<Status>, head_changed: bool, cx: &mut Context<Self>) {
+        let (old, new) = (&self.status.branch, &status.branch);
+        // A fetch moves the upstream, which the history shows too.
+        let upstream_changed =
+            old.upstream != new.upstream || old.ahead != new.ahead || old.behind != new.behind;
         self.status = status;
         // Keep selected files that are still in the same section.
         let still_there: HashSet<(Section, String)> =
@@ -149,7 +169,7 @@ impl GitPanel {
                 })
                 .collect();
         self.selected.retain(|key| still_there.contains(key));
-        if head_changed {
+        if head_changed || upstream_changed {
             self.reload_history(cx);
         }
         self.rebuild_rows();
@@ -214,6 +234,9 @@ impl GitPanel {
 
     fn reload_history(&mut self, cx: &mut Context<Self>) {
         self.history.clear();
+        self.graph.clear();
+        self.graph_state = Graph::default();
+        self.graph_lanes = 1;
         self.history_complete = self.repository().is_none();
         self.history_task = None;
         self.load_more_history(cx);
@@ -227,16 +250,29 @@ impl GitPanel {
             return;
         };
         let skip = self.history.len();
+        let upstream = self.status.branch.upstream.clone();
+        let mut graph = std::mem::take(&mut self.graph_state);
         self.history_task = Some(cx.spawn(async move |this, cx| {
             let page = cx
-                .background_spawn(async move { repo.log(skip, HISTORY_PAGE) })
+                .background_spawn(async move {
+                    let page = repo.log(upstream.as_deref(), skip, HISTORY_PAGE)?;
+                    let rows: Vec<GraphRow> = page
+                        .iter()
+                        .map(|commit| graph.push(&commit.oid, &commit.parents))
+                        .collect();
+                    git::Result::Ok((page, rows, graph))
+                })
                 .await;
             this.update(cx, |this, cx| {
                 this.history_task = None;
                 match page {
-                    Ok(page) => {
+                    Ok((page, rows, graph)) => {
                         this.history_complete = page.len() < HISTORY_PAGE;
                         this.history.extend(page);
+                        let lanes = rows.iter().map(GraphRow::width).fold(1, u16::max);
+                        this.graph_lanes = this.graph_lanes.max(lanes).min(MAX_LANES);
+                        this.graph.extend(rows);
+                        this.graph_state = graph;
                     }
                     Err(err) => {
                         this.history_complete = true;
@@ -917,10 +953,11 @@ impl GitPanel {
                     this.show_menu(event.position, targets, cx);
                 }),
             )
+            .child(ui::file_icon(name, px(14.)))
             .child(
                 div()
                     .flex_none()
-                    .text_color(color)
+                    .text_color(theme::text())
                     .when(deleted, |name| name.line_through())
                     .child(name.to_owned()),
             )
@@ -964,23 +1001,66 @@ impl GitPanel {
     ) -> Stateful<Div> {
         let commit = &self.history[ix];
         let oid = commit.oid.clone();
-        row.pl(px(24.))
-            .cursor_pointer()
-            .hover(|row| row.bg(theme::hover_bg()))
-            .tooltip(ui::text_tooltip(format!(
+        let branch = &self.status.branch;
+        let mut is_head = false;
+        let mut local = None;
+        let mut remote = None;
+        for name in commit.ref_names() {
+            match name {
+                RefName::Head => is_head = true,
+                RefName::Branch(name) if branch.head.as_deref() == Some(name) => local = Some(name),
+                RefName::Branch(name) if branch.upstream.as_deref() == Some(name) => {
+                    remote = Some(name)
+                }
+                _ => {}
+            }
+        }
+        let tooltip = if commit.refs.is_empty() {
+            format!(
                 "{}\n{} · {}",
                 commit.subject, commit.author, commit.short_oid
-            )))
+            )
+        } else {
+            format!(
+                "{}\n{} · {} · {}",
+                commit.subject, commit.author, commit.short_oid, commit.refs
+            )
+        };
+        row.pl(px(10.))
+            .cursor_pointer()
+            .hover(|row| row.bg(theme::hover_bg()))
+            .tooltip(ui::text_tooltip(tooltip))
             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                 cx.emit(GitPanelEvent::OpenCommit(oid.clone()))
             }))
-            .when(!commit.refs.is_empty(), |row| {
+            .child(self.render_graph(ix, is_head))
+            .when_some(local, |row, name| {
+                let tip = if remote.is_some() {
+                    format!(
+                        "{name} (local) is up to date with {}",
+                        branch.upstream.as_deref().unwrap_or("")
+                    )
+                } else {
+                    format!("{name} (local)")
+                };
                 row.child(
-                    div()
-                        .flex_none()
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(theme::accent()),
+                    ref_badge(IconName::GitBranch, name)
+                        .when(remote.is_some(), |badge| {
+                            badge.child(ui::icon_sized(
+                                IconName::Cloud,
+                                px(11.),
+                                theme::text_muted(),
+                            ))
+                        })
+                        .id("local-ref")
+                        .tooltip(ui::text_tooltip(tip)),
+                )
+            })
+            .when_some(remote.filter(|_| local.is_none()), |row, name| {
+                row.child(
+                    ref_badge(IconName::Cloud, name)
+                        .id("remote-ref")
+                        .tooltip(ui::text_tooltip(format!("{name} (remote)"))),
                 )
             })
             .child(
@@ -997,6 +1077,67 @@ impl GitPanel {
                     .text_color(theme::text_faint())
                     .child(short_age(commit.time, now)),
             )
+    }
+
+    /// The history graph's slice for one commit row.
+    fn render_graph(&self, ix: usize, is_head: bool) -> impl IntoElement {
+        let row = self.graph.get(ix).cloned().unwrap_or_default();
+        let lanes = self.graph_lanes;
+        canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let x = |lane: u16| bounds.left() + px(LANE_WIDTH * (lane as f32 + 0.5));
+                let top = bounds.top();
+                let mid = bounds.center().y;
+                let bottom = bounds.bottom();
+                for edge in &row.edges {
+                    if edge.from >= lanes || edge.to >= lanes {
+                        continue;
+                    }
+                    let mut path = PathBuilder::stroke(px(1.5));
+                    let (from, to) = (x(edge.from), x(edge.to));
+                    match edge.span {
+                        Span::Through => {
+                            path.move_to(gpui::point(from, top));
+                            path.line_to(gpui::point(to, bottom));
+                        }
+                        Span::Upper => {
+                            path.move_to(gpui::point(from, top));
+                            path.line_to(gpui::point(to, mid));
+                        }
+                        // Leaves the dot sideways and bends down into the
+                        // parent's lane.
+                        Span::Lower if from != to => {
+                            path.move_to(gpui::point(from, mid));
+                            let bend = gpui::point(to, mid);
+                            path.cubic_bezier_to(gpui::point(to, bottom), bend, bend);
+                        }
+                        Span::Lower => {
+                            path.move_to(gpui::point(from, mid));
+                            path.line_to(gpui::point(to, bottom));
+                        }
+                    }
+                    if let Ok(path) = path.build() {
+                        window.paint_path(path, lane_color(edge.color));
+                    }
+                }
+                let center = gpui::point(x(row.lane.min(lanes - 1)), mid);
+                let dot = |radius: f32| {
+                    gpui::Bounds::centered_at(center, gpui::size(px(radius * 2.), px(radius * 2.)))
+                };
+                let color = lane_color(row.color);
+                if is_head {
+                    // A ring marks the checked-out commit.
+                    window.paint_quad(fill(dot(4.5), color).corner_radii(px(4.5)));
+                    window.paint_quad(fill(dot(2.5), theme::panel_bg()).corner_radii(px(2.5)));
+                } else {
+                    window.paint_quad(fill(dot(3.5), color).corner_radii(px(3.5)));
+                }
+            },
+        )
+        .flex_none()
+        .w(px(LANE_WIDTH * lanes as f32))
+        .h_full()
     }
 
     fn render_message_box(&self, cx: &mut Context<Self>) -> Div {
@@ -1131,6 +1272,39 @@ impl Render for GitPanel {
             })
             .children(menu)
     }
+}
+
+/// Color of a history graph lane.
+fn lane_color(ix: u16) -> Hsla {
+    let syntax = theme::syntax();
+    let colors = [
+        syntax.function,
+        syntax.string,
+        syntax.keyword,
+        syntax.number,
+        syntax.ty,
+        syntax.tag,
+    ];
+    gpui::rgba(colors[ix as usize % colors.len()]).into()
+}
+
+/// A branch name next to a commit subject.
+fn ref_badge(icon: IconName, name: &str) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(3.))
+        .px_1()
+        .max_w(px(110.))
+        .rounded_sm()
+        .border_1()
+        .border_color(theme::border())
+        .bg(theme::elevated_bg())
+        .text_size(theme::ui_font_size_small())
+        .text_color(theme::text_muted())
+        .child(ui::icon_sized(icon, px(11.), theme::text_muted()))
+        .child(div().min_w_0().truncate().child(name.to_owned()))
 }
 
 #[cfg(test)]

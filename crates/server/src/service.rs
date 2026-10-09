@@ -214,7 +214,7 @@ impl Service {
                     Some(previous) => {
                         let (added, removed) = diff(&previous.index, &index);
                         // A delta bigger than the list (a different project) isn't worth it.
-                        if added.len() + removed.len() < index.files.len() {
+                        if added.len() + removed.len() < index.len() {
                             IndexUpdate {
                                 version,
                                 base: Some(previous.version),
@@ -304,11 +304,7 @@ fn whole(version: String, index: &FileIndex) -> IndexUpdate {
     IndexUpdate {
         version,
         base: None,
-        added: index
-            .files
-            .iter()
-            .map(|file| file.path.to_string())
-            .collect(),
+        added: index.files().map(|file| file.path.to_string()).collect(),
         removed: Vec::new(),
     }
 }
@@ -316,8 +312,8 @@ fn whole(version: String, index: &FileIndex) -> IndexUpdate {
 /// Files in `new` but not `old`, and the reverse. Both lists are sorted.
 fn diff(old: &FileIndex, new: &FileIndex) -> (Vec<String>, Vec<String>) {
     let (mut added, mut removed) = (Vec::new(), Vec::new());
-    let mut old = old.files.iter().map(|file| &*file.path).peekable();
-    let mut new = new.files.iter().map(|file| &*file.path).peekable();
+    let mut old = old.files().map(|file| file.path).peekable();
+    let mut new = new.files().map(|file| file.path).peekable();
     loop {
         match (old.peek(), new.peek()) {
             (Some(a), Some(b)) if a == b => {
