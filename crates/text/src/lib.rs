@@ -5,3 +5,4 @@
 mod buffer;
 
 pub use buffer::{Buffer, EditBatch, Selection, TAB, TextEdit};
+pub use ropey::Rope;

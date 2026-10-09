@@ -1,5 +1,6 @@
 //! In-process line diff, for change markers in the editor gutter.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use imara_diff::intern::InternedInput;
@@ -37,7 +38,7 @@ impl LineHunk {
 pub fn diff_lines(base: &str, current: &str) -> Vec<LineHunk> {
     let base = normalize(base);
     let current = normalize(current);
-    let input = InternedInput::new(base.as_str(), current.as_str());
+    let input = InternedInput::new(&*base, &*current);
     let mut hunks = Vec::new();
     diff(
         Algorithm::Histogram,
@@ -48,11 +49,15 @@ pub fn diff_lines(base: &str, current: &str) -> Vec<LineHunk> {
 }
 
 /// Strips `\r` and ends the text with a newline, so a missing final newline
-/// doesn't mark the last line as changed.
-fn normalize(text: &str) -> String {
-    let mut text = text.replace("\r\n", "\n");
+/// doesn't mark the last line as changed. Copies only when it has to.
+fn normalize(text: &str) -> Cow<'_, str> {
+    let mut text = if text.contains("\r\n") {
+        Cow::Owned(text.replace("\r\n", "\n"))
+    } else {
+        Cow::Borrowed(text)
+    };
     if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
+        text.to_mut().push('\n');
     }
     text
 }

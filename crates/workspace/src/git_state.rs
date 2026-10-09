@@ -78,6 +78,8 @@ pub(crate) struct GitState {
     pub repo: Arc<Repository>,
     pub paths: PathMap,
     pub status: Arc<Status>,
+    /// `git status` has finished at least once.
+    pub status_loaded: bool,
     status_task: Option<Task<()>>,
     /// Something changed while status was running; run it again after.
     status_stale: bool,
@@ -197,6 +199,7 @@ impl Workspace {
             paths: PathMap::new(repo.clone(), root),
             repo: repo.clone(),
             status: Arc::default(),
+            status_loaded: false,
             status_task: None,
             status_stale: false,
             _watcher: watcher,
@@ -227,9 +230,10 @@ impl Workspace {
                     return;
                 };
                 git.status_task = None;
+                let first = !std::mem::replace(&mut git.status_loaded, true);
                 let stale = std::mem::take(&mut git.status_stale);
                 match status {
-                    Ok(status) => this.apply_git_status(status, cx),
+                    Ok(status) => this.apply_git_status(status, first, cx),
                     Err(err) => {
                         this.status = Some(format!("git status failed: {err}").into());
                         cx.notify();
@@ -243,10 +247,17 @@ impl Workspace {
         }));
     }
 
-    fn apply_git_status(&mut self, status: Status, cx: &mut Context<Self>) {
+    fn apply_git_status(&mut self, status: Status, first: bool, cx: &mut Context<Self>) {
         let Some(git) = &mut self.git else {
             return;
         };
+        if !first && *git.status == status {
+            // The same files changed as before (most saves): the tree, the
+            // panel and the diff bases stay. Open diffs show contents, which
+            // may still have changed.
+            self.refresh_diff_tabs(cx);
+            return;
+        }
         let old = &git.status.branch;
         let head_changed = old.oid != status.branch.oid || old.head != status.branch.head;
         if head_changed {

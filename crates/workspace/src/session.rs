@@ -4,12 +4,17 @@
 //! overwrite each other's recent projects.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use gpui::{App, AppContext, Global};
 use remote::ConnectionOptions;
 use serde::{Deserialize, Serialize};
 
+use crate::file_history::ProjectHistory;
+
 const MAX_RECENT: usize = 10;
+/// [`update_soon`] saves this long after the first change.
+const SAVE_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -22,6 +27,9 @@ pub struct Session {
     /// The layout of the last local window saved.
     #[serde(default)]
     pub last: Option<WorkspaceState>,
+    /// Files opened per project, most recently opened project first.
+    #[serde(default)]
+    pub file_history: Vec<ProjectHistory>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +58,11 @@ struct Store(Session);
 
 impl Global for Store {}
 
+/// A save is coming (see [`update_soon`]).
+struct SaveScheduled;
+
+impl Global for SaveScheduled {}
+
 /// The shared session, if it has been loaded (`get` loads it).
 pub fn read(cx: &App) -> &Session {
     static EMPTY: std::sync::LazyLock<Session> = std::sync::LazyLock::new(Session::default);
@@ -71,6 +84,28 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Session)) {
     let snapshot = cx.global::<Store>().0.clone();
     cx.background_spawn(async move { save(&snapshot).ok() })
         .detach();
+}
+
+/// Changes the shared session and saves it shortly after: changes that come
+/// in a burst (switching through tabs) are saved once.
+pub fn update_soon(cx: &mut App, change: impl FnOnce(&mut Session)) {
+    get(cx);
+    change(&mut cx.global_mut::<Store>().0);
+    if cx.has_global::<SaveScheduled>() {
+        return;
+    }
+    cx.set_global(SaveScheduled);
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(SAVE_DELAY).await;
+        cx.update(|cx| {
+            cx.remove_global::<SaveScheduled>();
+            let snapshot = cx.global::<Store>().0.clone();
+            cx.background_spawn(async move { save(&snapshot).ok() })
+                .detach();
+        })
+        .ok();
+    })
+    .detach();
 }
 
 #[derive(Clone, Serialize, Deserialize)]

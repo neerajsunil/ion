@@ -19,6 +19,10 @@ const BATCH_DELAY: Duration = Duration::from_millis(80);
 /// Wait this long before re-indexing after files are added or removed.
 const REINDEX_DELAY: Duration = Duration::from_millis(400);
 
+/// More changes than this pending at once (a checkout, an unpacked archive)
+/// re-walk the project instead of updating the index path by path.
+const MAX_INDEX_CHANGES: usize = 1_000;
+
 /// More files than this changed together isn't an agent's edit.
 const MAX_AGENT_BATCH: usize = 10;
 impl Workspace {
@@ -177,7 +181,11 @@ impl Workspace {
                     }
                 });
             }
-            self.rebuild_index(true, cx);
+            if full_refresh {
+                self.rebuild_index(true, cx);
+            } else {
+                self.update_index(changed, cx);
+            }
         }
     }
 
@@ -296,45 +304,114 @@ impl Workspace {
             self.index_stale = true;
             return;
         }
+        // The walk sees these; changes from now on are applied after it.
+        self.index_changes.clear();
         let filesystem = self.filesystem.clone();
         let previous = self.file_index.clone();
         let indexed_root = root.clone();
+        self.index_progress = 0;
         self.index_task = Some(cx.spawn(async move |this, cx| {
             if delayed {
                 cx.background_executor().timer(REINDEX_DELAY).await;
             }
-            let index = cx
-                .background_spawn(async move { filesystem.build_index(&root, previous.as_deref()) })
-                .await;
+            let (sender, mut counts) = futures::channel::mpsc::unbounded();
+            let build = cx.background_spawn(async move {
+                filesystem.build_index(&root, previous.as_deref(), &|found| {
+                    sender.unbounded_send(found).ok();
+                })
+            });
+            while let Some(found) = counts.next().await {
+                let shown = this.update(cx, |this, cx| {
+                    this.index_progress = found;
+                    // Only the first index of a project shows in the status bar.
+                    if this.file_index.is_none() {
+                        cx.notify();
+                    }
+                });
+                if shown.is_err() {
+                    return;
+                }
+            }
+            let index = build.await;
             this.update(cx, |this, cx| {
                 this.index_task = None;
-                let index = match index {
-                    Ok(index) => index,
+                match index {
+                    Ok(index) => this.install_index(index, cx),
                     Err(error) => {
                         if this.root.as_ref() == Some(&indexed_root) {
                             this.status = Some(format!("Can't index project: {error}").into());
                             cx.notify();
                         }
-                        return;
                     }
-                };
-                // The project changed while indexing; this result is for the old one.
-                if this.root.as_deref() != Some(index.root.as_path()) {
-                    this.rebuild_index(false, cx);
-                    return;
                 }
-                let index = Arc::new(index);
-                this.file_index = Some(index.clone());
-                if let Some(Modal::Palette(palette)) = &this.modal {
-                    palette.update(cx, |palette, cx| palette.set_index(index.clone(), cx));
-                }
-                this.project_search_set_index(Some(index), cx);
-                if std::mem::take(&mut this.index_stale) {
-                    this.rebuild_index(true, cx);
-                }
-                cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// Applies created, removed or renamed paths to the index in the
+    /// background, without walking the whole project. Remote projects (and
+    /// a project still being indexed) build it again instead: the server
+    /// already sends only what changed.
+    fn update_index(&mut self, changed: HashSet<PathBuf>, cx: &mut Context<Self>) {
+        if self.filesystem.remote().is_some() || self.file_index.is_none() {
+            self.rebuild_index(true, cx);
+            return;
+        }
+        self.index_changes.extend(changed);
+        if self.index_changes.len() > MAX_INDEX_CHANGES {
+            self.rebuild_index(true, cx);
+            return;
+        }
+        if self.index_task.is_none() {
+            self.start_index_update(cx);
+        }
+    }
+
+    fn start_index_update(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.file_index.clone() else {
+            return;
+        };
+        self.index_task = Some(cx.spawn(async move |this, cx| {
+            // Let a burst of changes collect into one update.
+            cx.background_executor().timer(REINDEX_DELAY).await;
+            let Ok(changed) = this.update(cx, |this, _| std::mem::take(&mut this.index_changes))
+            else {
+                return;
+            };
+            let updated = cx
+                .background_spawn(async move { index.updated(&changed) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.index_task = None;
+                match updated {
+                    Some(index) => this.install_index(index, cx),
+                    None => this.rebuild_index(false, cx),
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Makes a freshly built or updated index current, then catches up with
+    /// changes made meanwhile.
+    fn install_index(&mut self, index: project::FileIndex, cx: &mut Context<Self>) {
+        // The project changed while indexing; this result is for the old one.
+        if self.root.as_deref() != Some(index.root.as_path()) {
+            self.rebuild_index(false, cx);
+            return;
+        }
+        let index = Arc::new(index);
+        self.file_index = Some(index.clone());
+        if let Some(Modal::Palette(palette)) = &self.modal {
+            palette.update(cx, |palette, cx| palette.set_index(index.clone(), cx));
+        }
+        self.project_search_set_index(Some(index), cx);
+        if std::mem::take(&mut self.index_stale) {
+            self.rebuild_index(true, cx);
+        } else if !self.index_changes.is_empty() {
+            self.start_index_update(cx);
+        }
+        cx.notify();
     }
 }

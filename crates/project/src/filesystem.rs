@@ -189,9 +189,16 @@ impl FileSystem {
     /// The project's files. A remote rebuild given the `previous` index
     /// fetches only the changes since it.
     #[cfg_attr(not(feature = "remote"), allow(unused_variables))]
-    pub fn build_index(&self, root: &Path, previous: Option<&FileIndex>) -> io::Result<FileIndex> {
+    /// Lists the project's files. Local projects call `progress` with the
+    /// number found so far as they go; remote ones get the list in one reply.
+    pub fn build_index(
+        &self,
+        root: &Path,
+        previous: Option<&FileIndex>,
+        progress: &(dyn Fn(usize) + Sync),
+    ) -> io::Result<FileIndex> {
         match self {
-            Self::Local => Ok(FileIndex::build(root)),
+            Self::Local => Ok(FileIndex::build_with_progress(root, progress)),
             #[cfg(feature = "remote")]
             Self::Ssh(connection) => {
                 let previous = previous.filter(|previous| previous.root == root);

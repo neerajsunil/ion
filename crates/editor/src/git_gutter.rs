@@ -10,6 +10,8 @@ use crate::Editor;
 
 /// Wait this long after an edit before re-diffing, so typing stays cheap.
 const DIFF_DELAY: Duration = Duration::from_millis(120);
+/// Files larger than this get no change markers (like highlighting).
+const MAX_DIFF_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) struct GitDiffState {
     /// The file's text at HEAD.
@@ -83,7 +85,12 @@ impl Editor {
                 return;
             };
             let hunks = cx
-                .background_spawn(async move { git::diff_lines(&base, &rope.to_string()) })
+                .background_spawn(async move {
+                    if base.len().max(rope.len_bytes()) > MAX_DIFF_BYTES {
+                        return Vec::new();
+                    }
+                    git::diff_lines(&base, &rope.to_string())
+                })
                 .await;
             this.update(cx, |editor, cx| {
                 let current = editor.buffer.version();

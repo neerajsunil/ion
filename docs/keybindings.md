@@ -28,7 +28,7 @@ palette**, and as a tooltip on each button.
 
 | Shortcut | Action |
 |---|---|
-| Ctrl+P | Go to file (or click the search box in the title bar). Recent and agent-changed files come first; `path:line:column` opens at that line |
+| Ctrl+P | Go to file (or click the search box in the title bar). Recent and agent-changed files come first, then the files you use most; words match in any order; `path:line:column` opens at that line |
 | Ctrl+Shift+P or F1 | Command palette: type `>` then a command name |
 | Ctrl+G | Go to line (`line` or `line:column`) |
 | Ctrl+, | Settings (type to search every setting) |

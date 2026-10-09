@@ -16,13 +16,14 @@ use project::{FileIndex, FileSystem, FsWatcher};
 
 use crate::branch_picker::BranchPicker;
 use crate::diff_view::DiffTarget;
+use crate::file_history::{self, FileUse};
 use crate::find_bar::{FindBar, FindBarEvent};
 use crate::git_panel::{GitPanel, GitPanelEvent};
 use crate::git_state::GitState;
 use crate::palette::{Palette, PaletteEvent, RecentFile};
 use crate::pane::{Axis, Pane, PaneId, PaneNode, Region, Side};
 use crate::pane_view::{LayoutBounds, Resize};
-use crate::project_search::{ProjectSearch, ProjectSearchEvent};
+use crate::project_search::{ProjectSearch, ProjectSearchEvent, SearchContext};
 use crate::prompt::{InputPrompt, InputPromptEvent};
 use crate::session;
 
@@ -90,6 +91,8 @@ pub struct NewAgent(pub terminal::HarnessKind);
 const CONTEXT: Option<&str> = Some("Workspace");
 /// Recently used files remembered for Go to File.
 const MAX_RECENT_FILES: usize = 50;
+/// Project search looks at up to this many Git-changed files first.
+const MAX_SEARCH_FIRST_CHANGED: usize = 200;
 pub(crate) const SIDEBAR_WIDTH: f32 = 260.;
 const SIDEBAR_MIN_WIDTH: f32 = 180.;
 const SIDEBAR_MAX_WIDTH: f32 = 600.;
@@ -284,8 +287,13 @@ pub struct Workspace {
     pub(crate) file_clipboard: Option<crate::file_ops::FileClipboard>,
     pub(crate) file_index: Option<Arc<FileIndex>>,
     pub(crate) index_task: Option<Task<()>>,
+    /// Files the running index build has found so far (local projects).
+    pub(crate) index_progress: usize,
     /// Files changed while the index was being built; build again after.
     pub(crate) index_stale: bool,
+    /// Files and folders created, removed or renamed since the index was
+    /// last updated (local projects); applied to it without a full walk.
+    pub(crate) index_changes: Vec<PathBuf>,
     pub(crate) watcher: Option<FsWatcher>,
     pub(crate) watch_task: Option<Task<()>>,
     /// Files with a "changed on disk" prompt open, so it isn't asked twice.
@@ -333,6 +341,15 @@ impl Workspace {
         session::get(cx);
         let find_bar = cx.new(FindBar::new);
         let project_search = cx.new(ProjectSearch::new);
+        let workspace = cx.weak_entity();
+        project_search.update(cx, |search, _| {
+            search.set_context(move |cx| {
+                workspace
+                    .upgrade()
+                    .map(|workspace| workspace.read(cx).search_context(cx))
+                    .unwrap_or_default()
+            })
+        });
         let git_panel = cx.new(GitPanel::new);
         let subscriptions = vec![
             cx.subscribe_in(
@@ -425,7 +442,9 @@ impl Workspace {
             file_clipboard: None,
             file_index: None,
             index_task: None,
+            index_progress: 0,
             index_stale: false,
+            index_changes: Vec::new(),
             watcher: None,
             watch_task: None,
             conflicts: Default::default(),
@@ -496,6 +515,7 @@ impl Workspace {
         self.sidebar_visible = true;
         self.sidebar_mode = SidebarMode::Files;
         self.file_index = None;
+        self.index_changes.clear();
         self.recent_files.clear();
         self.project_search.update(cx, |search, cx| {
             search.set_filesystem(self.filesystem.clone());
@@ -931,6 +951,48 @@ impl Workspace {
         self.recent_files.truncate(MAX_RECENT_FILES);
     }
 
+    /// What project search looks at first: open tabs (the active one first),
+    /// then recently used, agent-changed and Git-changed files; and the
+    /// unsaved text of edited tabs.
+    fn search_context(&self, cx: &gpui::App) -> SearchContext {
+        let mut editors: Vec<Entity<Editor>> = self
+            .items()
+            .filter(|(_, item)| item.diff().is_none())
+            .filter_map(|(_, item)| item.editor().cloned())
+            .collect();
+        if let Some(active) = self.active_editor()
+            && let Some(ix) = editors.iter().position(|editor| *editor == active)
+        {
+            let active = editors.remove(ix);
+            editors.insert(0, active);
+        }
+        let mut context = SearchContext::default();
+        for editor in &editors {
+            let editor = editor.read(cx);
+            let Some(path) = editor.path() else {
+                continue;
+            };
+            if context.first.iter().any(|known| known == path) {
+                continue;
+            }
+            context.first.push(path.to_path_buf());
+            if editor.is_dirty() {
+                context.buffers.push((path.to_path_buf(), editor.rope()));
+            }
+        }
+        context.first.extend(self.recent_files.iter().cloned());
+        context
+            .first
+            .extend(self.touched.values().flatten().cloned());
+        if let Some(git) = &self.git {
+            let changed = git.status.entries.iter().take(MAX_SEARCH_FIRST_CHANGED);
+            context
+                .first
+                .extend(changed.map(|entry| git.paths.absolute(&entry.path)));
+        }
+        context
+    }
+
     /// Recent files for Go to File, labeled, without the one being shown
     /// (switching to it would do nothing).
     fn palette_recent_files(&self, cx: &gpui::App) -> Vec<RecentFile> {
@@ -953,6 +1015,48 @@ impl Workspace {
             .collect()
     }
 
+    /// Names this project in the saved file history: its root, after the
+    /// host for remote projects.
+    fn history_key(&self) -> Option<String> {
+        let root = self.root.as_ref()?.to_string_lossy();
+        Some(match self.filesystem.remote() {
+            Some(connection) => format!("ssh://{}{root}", connection.label()),
+            None => root.into_owned(),
+        })
+    }
+
+    /// Counts a use of `path` (shown in an editor) toward its rank in Go to
+    /// File, and saves it soon.
+    pub(crate) fn record_file_use(&self, path: &Path, cx: &mut gpui::App) {
+        // Reopening last session's tabs isn't a use.
+        if self.restoring {
+            return;
+        }
+        let Some(project) = self.history_key() else {
+            return;
+        };
+        let now = file_history::now();
+        session::update_soon(cx, |session| {
+            file_history::record(&mut session.file_history, &project, path, now)
+        });
+    }
+
+    /// Files used in this project in any session, for Go to File, without
+    /// the one being shown.
+    fn file_history(&self, cx: &gpui::App) -> Vec<FileUse> {
+        let Some(project) = self.history_key() else {
+            return Vec::new();
+        };
+        let shown = self
+            .active_editor()
+            .and_then(|editor| editor.read(cx).path().map(Path::to_path_buf));
+        file_history::files(&session::read(cx).file_history, &project)
+            .iter()
+            .filter(|file| Some(&file.path) != shown.as_ref())
+            .cloned()
+            .collect()
+    }
+
     /// Opens the palette for files ("") or commands (">"), or closes it.
     fn toggle_palette(&mut self, prefix: &str, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.modal, Some(Modal::Palette(_))) {
@@ -962,7 +1066,8 @@ impl Workspace {
         let index = self.file_index.clone();
         let remote = self.filesystem.remote().is_some();
         let recent = self.palette_recent_files(cx);
-        let palette = cx.new(|cx| Palette::new(index, recent, prefix, remote, window, cx));
+        let history = self.file_history(cx);
+        let palette = cx.new(|cx| Palette::new(index, recent, history, prefix, remote, window, cx));
         let subscription =
             cx.subscribe_in(&palette, window, |this, _, event, window, cx| match event {
                 PaletteEvent::OpenFile(path, position) => {

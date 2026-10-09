@@ -6,15 +6,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures::StreamExt;
+
 use editor::{Editor, EditorEvent};
 use gpui::{
-    AppContext, ClickEvent, Context, Div, Entity, EventEmitter, FontWeight, HighlightStyle,
+    App, AppContext, ClickEvent, Context, Div, Entity, EventEmitter, FontWeight, HighlightStyle,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Stateful,
     StatefulInteractiveElement, Styled, StyledText, Subscription, Task, UniformListScrollHandle,
     Window, div, prelude::FluentBuilder, px, uniform_list,
 };
 use project::FileIndex;
-use project::search::{SearchResults, search_with_filesystem};
+use project::search::{FileMatches, Sources, stream_with_filesystem};
 
 const ROW_HEIGHT: f32 = 22.;
 /// Wait this long after typing stops before searching.
@@ -28,6 +30,18 @@ pub enum ProjectSearchEvent {
     },
 }
 
+/// What a search looks at before the rest of the project, taken from the
+/// workspace when the search starts.
+#[derive(Default)]
+pub struct SearchContext {
+    /// Absolute paths, most relevant first.
+    pub first: Vec<PathBuf>,
+    /// Open files with unsaved changes, searched instead of the disk.
+    pub buffers: Vec<(PathBuf, text::Rope)>,
+}
+
+type ContextSource = Box<dyn Fn(&App) -> SearchContext>;
+
 enum Row {
     File(usize),
     Line(usize, usize),
@@ -39,7 +53,13 @@ pub struct ProjectSearch {
     query: Entity<Editor>,
     case_sensitive: bool,
     index: Option<Arc<FileIndex>>,
-    results: Option<Arc<SearchResults>>,
+    context: Option<ContextSource>,
+    /// Files with matches, in search order. `None` before the first search.
+    results: Option<Vec<FileMatches>>,
+    truncated: bool,
+    /// The results shown are from the previous search: the next batch
+    /// replaces them.
+    stale: bool,
     rows: Vec<Row>,
     searching: bool,
     /// Set to stop the running search when a newer one starts.
@@ -65,7 +85,10 @@ impl ProjectSearch {
             query,
             case_sensitive: false,
             index: None,
+            context: None,
             results: None,
+            truncated: false,
+            stale: false,
             rows: Vec::new(),
             searching: false,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -84,6 +107,11 @@ impl ProjectSearch {
 
     pub fn set_filesystem(&mut self, filesystem: project::FileSystem) {
         self.filesystem = filesystem;
+    }
+
+    /// Where searches get the files to look at first.
+    pub fn set_context(&mut self, context: impl Fn(&App) -> SearchContext + 'static) {
+        self.context = Some(Box::new(context));
     }
 
     /// Focuses the query, optionally replacing it with `text`.
@@ -116,39 +144,87 @@ impl ProjectSearch {
         let filesystem = self.filesystem.clone();
         self.error = None;
         self.searching = true;
+        self.stale = true;
         cx.notify();
         self.search_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(DEBOUNCE).await;
-            let results = cx
-                .background_spawn(async move {
-                    search_with_filesystem(&filesystem, &index, &query, case_sensitive, &cancel)
-                })
-                .await;
-            this.update(cx, |this, cx| match results {
-                Ok(results) => this.show_results(results, cx),
-                Err(error) => {
-                    this.error = Some(error.to_string());
-                    this.searching = false;
-                    this.results = None;
-                    this.rows.clear();
-                    cx.notify();
+            let Ok(context) = this.update(cx, |this, cx| {
+                this.context
+                    .as_ref()
+                    .map(|context| context(cx))
+                    .unwrap_or_default()
+            }) else {
+                return;
+            };
+            let (sender, mut batches) = futures::channel::mpsc::unbounded();
+            let search = cx.background_spawn(async move {
+                let sources = Sources {
+                    first: context.first,
+                    buffers: context
+                        .buffers
+                        .into_iter()
+                        .map(|(path, rope)| (path, rope.to_string()))
+                        .collect(),
+                };
+                stream_with_filesystem(
+                    &filesystem,
+                    &index,
+                    &query,
+                    case_sensitive,
+                    &sources,
+                    &cancel,
+                    &|batch| {
+                        sender.unbounded_send(batch).ok();
+                    },
+                )
+            });
+            while let Some(batch) = batches.next().await {
+                if this
+                    .update(cx, |this, cx| this.add_results(batch, cx))
+                    .is_err()
+                {
+                    return;
                 }
+            }
+            let outcome = search.await;
+            this.update(cx, |this, cx| {
+                if this.stale {
+                    this.add_results(Vec::new(), cx);
+                }
+                this.searching = false;
+                match outcome {
+                    Ok(truncated) => this.truncated = truncated,
+                    Err(error) => {
+                        this.error = Some(error.to_string());
+                        this.results = None;
+                        this.rows.clear();
+                    }
+                }
+                cx.notify();
             })
             .ok();
         }));
     }
 
-    fn show_results(&mut self, results: SearchResults, cx: &mut Context<Self>) {
+    /// Adds a batch of results in search order, replacing the previous
+    /// search's results on the first one.
+    fn add_results(&mut self, batch: Vec<FileMatches>, cx: &mut Context<Self>) {
+        let results = self.results.get_or_insert_with(Vec::new);
+        if self.stale {
+            self.stale = false;
+            self.truncated = false;
+            results.clear();
+            self.scroll_handle
+                .scroll_to_item(0, gpui::ScrollStrategy::Top);
+        }
+        results.extend(batch);
+        results.sort_by_key(|file| file.order);
         self.rows.clear();
-        for (file_ix, file) in results.files.iter().enumerate() {
+        for (file_ix, file) in results.iter().enumerate() {
             self.rows.push(Row::File(file_ix));
             self.rows
                 .extend((0..file.lines.len()).map(|line_ix| Row::Line(file_ix, line_ix)));
         }
-        self.results = Some(Arc::new(results));
-        self.searching = false;
-        self.scroll_handle
-            .scroll_to_item(0, gpui::ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -161,7 +237,7 @@ impl ProjectSearch {
             Some(Row::Line(file_ix, line_ix)) => (*file_ix, *line_ix),
             None => return,
         };
-        let file = &results.files[file_ix];
+        let file = &results[file_ix];
         let line = &file.lines[line_ix];
         cx.emit(ProjectSearchEvent::Open {
             path: file.absolute.clone(),
@@ -174,25 +250,27 @@ impl ProjectSearch {
         if let Some(error) = &self.error {
             return error.clone().into();
         }
-        if self.searching {
-            return "Searching…".into();
-        }
-        let Some(results) = &self.results else {
-            return if self.index.is_none() {
-                "Indexing files…".into()
-            } else {
-                "".into()
-            };
+        let results = match &self.results {
+            Some(results) if !self.stale => results,
+            _ if self.searching => return "Searching…".into(),
+            Some(results) => results,
+            None if self.index.is_none() => return "Indexing files…".into(),
+            None => return "".into(),
         };
-        let lines: usize = results.files.iter().map(|file| file.lines.len()).sum();
+        let lines: usize = results.iter().map(|file| file.lines.len()).sum();
         if lines == 0 {
-            return "No results".into();
+            return if self.searching {
+                "Searching…".into()
+            } else {
+                "No results".into()
+            };
         }
-        let more = if results.truncated { "+" } else { "" };
+        let more = if self.truncated { "+" } else { "" };
         let plural = |n: usize| if n == 1 { "" } else { "s" };
-        let files = results.files.len();
+        let files = results.len();
+        let searching = if self.searching { ", searching…" } else { "" };
         format!(
-            "{lines}{more} result{} in {files} file{}",
+            "{lines}{more} result{} in {files} file{}{searching}",
             plural(lines),
             plural(files)
         )
@@ -200,7 +278,7 @@ impl ProjectSearch {
     }
 
     fn render_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
-        let Some(results) = self.results.clone() else {
+        let Some(results) = &self.results else {
             return Vec::new();
         };
         range
@@ -219,7 +297,7 @@ impl ProjectSearch {
                     );
                 Some(match self.rows.get(ix)? {
                     Row::File(file_ix) => {
-                        let file = &results.files[*file_ix];
+                        let file = &results[*file_ix];
                         let (dir, name) = file.path.rsplit_once('/').unwrap_or(("", &file.path));
                         row.px_2()
                             .child(
@@ -237,7 +315,7 @@ impl ProjectSearch {
                             )
                     }
                     Row::Line(file_ix, line_ix) => {
-                        let line = &results.files[*file_ix].lines[*line_ix];
+                        let line = &results[*file_ix].lines[*line_ix];
                         let highlight = HighlightStyle {
                             color: Some(theme::text()),
                             font_weight: Some(FontWeight::BOLD),

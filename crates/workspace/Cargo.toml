@@ -23,6 +23,7 @@ git.workspace = true
 project = { workspace = true, features = ["remote"] }
 settings.workspace = true
 syntax.workspace = true
+text.workspace = true
 terminal.workspace = true
 theme.workspace = true
 ui.workspace = true

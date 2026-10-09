@@ -307,6 +307,11 @@ impl Editor {
         self.buffer.text()
     }
 
+    /// The text for background work: cloning a rope is O(1).
+    pub fn rope(&self) -> text::Rope {
+        self.buffer.rope().clone()
+    }
+
     /// The faint text shown while the input is empty.
     pub fn set_placeholder(
         &mut self,

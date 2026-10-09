@@ -82,7 +82,8 @@ Rules:
 1. **One pool.** No tokio runtime or rayon pool next to GPUI's executor. Every
    extra runtime adds threads that sit around idle. Bursty work that wants
    every core (indexing, project search) uses scoped threads that exit as soon
-   as the job is done.
+   as the job is done. Project search uses at most 8: past that, reading files
+   gets no faster, because the OS serializes much of the work.
 2. **Snapshots, not locks.** Background jobs get immutable snapshots (cloning a
    rope is O(1)) and send results back to the UI thread. No locks are held
    across threads.

@@ -3071,6 +3071,7 @@ dependencies = [
  "ion_settings",
  "ion_syntax",
  "ion_terminal",
+ "ion_text",
  "ion_theme",
  "ion_ui",
  "pulldown-cmark",

@@ -8,6 +8,20 @@ All notable changes to Ion are documented here. The format follows
 
 ### Added
 
+- Project search (Ctrl+Shift+F) shows results as they're found instead of
+  after the whole project is read, and looks first where matches are most
+  likely: open tabs, then recent, agent-changed and Git-changed files, then
+  source code, then other text files, then everything else. It also searches
+  unsaved changes in open tabs. On the Linux kernel (96k files) the first
+  result appears in milliseconds instead of after about 1.7 seconds.
+- The status bar shows what Ion is doing while a project opens: indexing
+  files (with a running count for local projects) and reading Git status.
+- Go to File (Ctrl+P) remembers the files you use in each project across
+  restarts and ranks the ones you use most and most recently first. Words
+  separated by spaces match in any order (`e1000 main` finds
+  `e1000/e1000_main.c`), and typing more letters only re-checks the files
+  that already matched, so each keystroke stays fast in huge projects.
+
 - A new Settings page with a side menu and a search box that looks through
   every setting and shortcut.
 - Change any keyboard shortcut: click it and press new keys, or remove it.
@@ -127,6 +141,18 @@ All notable changes to Ion are documented here. The format follows
   (labeled "changed by agent" or "open") and ranks them ahead of other
   equally good matches. Paste `src/a.rs:12:5`, `a.rs(12,5)` or an absolute
   path in the project to open it at that line.
+- Less background work when files change. Creating, deleting or renaming
+  files updates the file list in place instead of re-reading the whole
+  project (9 ms instead of 99 ms on a 27k-file project, with no disk reads).
+  The watcher skips everything the file list skips (`.gitignore` in every
+  folder, `.git/info/exclude` and the global excludes file), so builds in
+  ignored folders cost nothing; `.gitignore` now also applies outside Git
+  repositories. Saving a file whose Git status didn't change no longer
+  redraws the tree and Git panel.
+- Go to File matches large projects (over 20k files) in the background, so
+  typing never waits on it, and project search is about a third faster on
+  files without a match. Change markers copy less text on each re-diff and
+  are skipped for files over 8 MB.
 
 ### Fixed
 

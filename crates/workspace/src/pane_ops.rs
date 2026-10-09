@@ -444,6 +444,7 @@ impl Workspace {
                 let path = editor.read(cx).path().map(Path::to_path_buf);
                 if let Some(path) = &path {
                     self.note_recent_file(path.clone());
+                    self.record_file_use(path, cx);
                 }
                 if let Some(tree) = &self.file_tree {
                     tree.update(cx, |tree, cx| tree.set_active(path, cx));

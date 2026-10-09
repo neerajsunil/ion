@@ -787,6 +787,25 @@ impl Workspace {
 
     // ---- status bar ----------------------------------------------------------
 
+    /// Work done while a project opens, for the status bar: the first file
+    /// index and the first `git status`. Later refreshes keep the old results
+    /// on screen, so they aren't shown.
+    fn background_activity(&self) -> Option<String> {
+        let mut work = Vec::new();
+        if self.root.is_some() && self.file_index.is_none() && self.index_task.is_some() {
+            work.push(match self.index_progress {
+                0 => "Indexing files".to_owned(),
+                found => format!("Indexing files · {} found", group_digits(found)),
+            });
+        }
+        let git_loading =
+            self.git_discovery.is_some() || self.git.as_ref().is_some_and(|git| !git.status_loaded);
+        if git_loading {
+            work.push("Reading Git status".to_owned());
+        }
+        (!work.is_empty()).then(|| format!("{}…", work.join(" · ")))
+    }
+
     pub(crate) fn render_status_bar(&self, cx: &mut Context<Self>) -> Div {
         let active_editor = self.active_editor();
         let editor = active_editor.as_ref().map(|editor| editor.read(cx));
@@ -832,6 +851,7 @@ impl Workspace {
         });
         let attention = self.hidden_attention(cx);
         let following = self.following_label(cx);
+        let activity = self.background_activity();
 
         div()
             .h(px(STATUS_HEIGHT))
@@ -894,6 +914,18 @@ impl Workspace {
                     }))
             }))
             .children(self.render_problem_counts(cx))
+            .children(activity.map(|label| {
+                item("activity")
+                    .child(ui::icon_sized(
+                        IconName::RefreshCw,
+                        px(13.),
+                        theme::text_muted(),
+                    ))
+                    .child(label)
+                    .tooltip(ui::text_tooltip(
+                        "Reading the project. Go to File, search and Git markers fill in when it's done.",
+                    ))
+            }))
             .children(self.status.clone().map(|status| {
                 div()
                     .min_w_0()
@@ -965,6 +997,19 @@ impl Workspace {
     }
 }
 
+/// `95940` as `95,940`.
+fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (ix, digit) in digits.chars().enumerate() {
+        if ix > 0 && (digits.len() - ix).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
 /// Below the clicked element, aligned to its left edge.
 fn menu_position(event: &ClickEvent, below: f32) -> Point<Pixels> {
     let position = event.position();
@@ -1021,4 +1066,18 @@ fn window_controls(window: &Window) -> Div {
             WindowControlArea::Close,
             true,
         ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn groups_digits() {
+        assert_eq!(group_digits(0), "0");
+        assert_eq!(group_digits(999), "999");
+        assert_eq!(group_digits(1_000), "1,000");
+        assert_eq!(group_digits(95_940), "95,940");
+        assert_eq!(group_digits(1_234_567), "1,234,567");
+    }
 }

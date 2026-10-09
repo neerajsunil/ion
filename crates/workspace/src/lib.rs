@@ -7,6 +7,7 @@ mod branch_picker;
 mod chrome;
 mod commands;
 mod diff_view;
+mod file_history;
 mod file_ops;
 mod find_bar;
 mod fs_sync;

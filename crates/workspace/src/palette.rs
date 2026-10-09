@@ -1,21 +1,24 @@
 //! The palette: find a file by name (Ctrl+P), or a command after ">"
-//! (Ctrl+Shift+P). Recently used and agent-changed files come first, and a
+//! (Ctrl+Shift+P). With no query, recently used and agent-changed files come
+//! first; among equally good matches, the most used ones (frecency) win. A
 //! pasted `path:line:column` opens at that position.
 
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use editor::{Editor, EditorEvent};
 use gpui::{
     Action, AppContext, ClickEvent, Context, Div, Entity, EventEmitter, Focusable,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, ScrollStrategy,
-    SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription, Task,
     UniformListScrollHandle, Window, actions, div, prelude::FluentBuilder, px, uniform_list,
 };
 use project::FileIndex;
 use ui::IconName;
 
 use crate::commands::{self, Command};
+use crate::file_history::FileUse;
 
 actions!(palette, [Dismiss]);
 
@@ -23,6 +26,9 @@ const CONTEXT: &str = "Palette";
 const ROW_HEIGHT: f32 = 32.;
 const MAX_VISIBLE_ROWS: usize = 12;
 const MAX_FILES: usize = 200;
+/// Matching more files than this happens in the background, so typing never
+/// waits on a large project.
+const MAX_FILES_MATCHED_INLINE: usize = 20_000;
 
 pub fn key_bindings() -> Vec<KeyBinding> {
     vec![KeyBinding::new("escape", Dismiss, Some(CONTEXT))]
@@ -42,8 +48,19 @@ pub struct RecentFile {
     pub label: Option<&'static str>,
 }
 
-/// A recent file found in the index: (file, position in the recent list, label).
-type RecentEntry = (usize, u32, Option<&'static str>);
+/// A file used before, found in the index.
+#[derive(Debug, PartialEq)]
+struct RecentEntry {
+    file: usize,
+    /// Position when ordered most recently used first (for an empty query).
+    recency: u32,
+    /// Position when ordered most used first (to break ties in a query).
+    frecency: u32,
+    label: Option<&'static str>,
+}
+
+/// A file query and the position of every file it matched.
+type Narrowed = (String, Vec<usize>);
 
 enum Choice {
     File(usize),
@@ -54,8 +71,16 @@ pub struct Palette {
     query: Entity<Editor>,
     index: Option<Arc<FileIndex>>,
     recent: Vec<RecentFile>,
-    /// `recent` located in `index`, sorted by file.
-    recent_entries: Vec<RecentEntry>,
+    /// Files used in earlier sessions too.
+    history: Vec<FileUse>,
+    /// `recent` and `history` located in `index`, sorted by file.
+    recent_entries: Arc<[RecentEntry]>,
+    /// The last file query and every file it matched: a longer query only
+    /// searches those.
+    narrowed: Option<Arc<Narrowed>>,
+    /// Matching the current query in the background; replacing it drops
+    /// the result of an older query.
+    match_task: Option<Task<()>>,
     /// The one-based line and column typed after the file name.
     position: Option<(usize, Option<usize>)>,
     commands: Vec<Command>,
@@ -74,6 +99,7 @@ impl Palette {
     pub fn new(
         index: Option<Arc<FileIndex>>,
         recent: Vec<RecentFile>,
+        history: Vec<FileUse>,
         initial: &str,
         remote: bool,
         window: &mut Window,
@@ -104,7 +130,10 @@ impl Palette {
             query,
             index: None,
             recent,
-            recent_entries: Vec::new(),
+            history,
+            recent_entries: Arc::from([]),
+            narrowed: None,
+            match_task: None,
             position: None,
             commands,
             shortcuts,
@@ -122,16 +151,20 @@ impl Palette {
 
     /// Supplies the file index when it finishes building after opening.
     pub fn set_index(&mut self, index: Arc<FileIndex>, cx: &mut Context<Self>) {
-        self.recent_entries = locate_recent(&index, &self.recent);
+        self.recent_entries = locate_recent(
+            &index,
+            &self.recent,
+            &self.history,
+            crate::file_history::now(),
+        )
+        .into();
+        self.narrowed = None;
         self.index = Some(index);
         self.update_choices(cx);
     }
 
     fn recent_entry(&self, file: usize) -> Option<&RecentEntry> {
-        self.recent_entries
-            .binary_search_by_key(&file, |entry| entry.0)
-            .ok()
-            .map(|ix| &self.recent_entries[ix])
+        recent_entry(&self.recent_entries, file)
     }
 
     fn command_query(&self, cx: &gpui::App) -> Option<String> {
@@ -140,36 +173,60 @@ impl Palette {
     }
 
     fn update_choices(&mut self, cx: &mut Context<Self>) {
-        self.choices = match self.command_query(cx) {
-            Some(query) => commands::matching(&self.commands, &query)
+        self.match_query(false, cx);
+    }
+
+    /// Matches the query and shows the results: right away for commands and
+    /// small projects, else once a background match finishes (or now, with
+    /// `wait`).
+    fn match_query(&mut self, wait: bool, cx: &mut Context<Self>) {
+        self.match_task = None;
+        if let Some(query) = self.command_query(cx) {
+            let choices = commands::matching(&self.commands, &query)
                 .into_iter()
                 .map(Choice::Command)
-                .collect(),
-            None => {
-                let text = self.query.read(cx).text();
-                let (query, position) = fuzzy::split_position(&text);
-                self.position = position;
-                match &self.index {
-                    Some(index) => fuzzy::match_paths(
-                        index
-                            .files
-                            .iter()
-                            .enumerate()
-                            .map(|(ix, file)| fuzzy::Candidate {
-                                path_lower: &file.path_lower,
-                                name_start: file.name_start,
-                                recent: self.recent_entry(ix).map(|entry| entry.1),
-                            }),
-                        within_root(index, query),
-                        MAX_FILES,
-                    )
-                    .into_iter()
-                    .map(|m| Choice::File(m.index))
-                    .collect(),
-                    None => Vec::new(),
-                }
-            }
+                .collect();
+            self.show(choices, cx);
+            return;
+        }
+        let text = self.query.read(cx).text();
+        let (query, position) = fuzzy::split_position(&text);
+        self.position = position;
+        let Some(index) = self.index.clone() else {
+            self.show(Vec::new(), cx);
+            return;
         };
+        let query = within_root(&index, query).to_owned();
+        let recent = self.recent_entries.clone();
+        let narrowed = self
+            .narrowed
+            .clone()
+            .filter(|narrowed| fuzzy::narrows(&narrowed.0, &query));
+        let count = narrowed
+            .as_ref()
+            .map_or(index.files.len(), |narrowed| narrowed.1.len());
+        if wait || count <= MAX_FILES_MATCHED_INLINE {
+            let (files, narrowed) = match_files(&index, &recent, narrowed.as_deref(), &query);
+            self.narrowed = narrowed.map(Arc::new);
+            self.show(files.into_iter().map(Choice::File).collect(), cx);
+            return;
+        }
+        let matching = cx.background_spawn(async move {
+            match_files(&index, &recent, narrowed.as_deref(), &query)
+        });
+        self.match_task = Some(cx.spawn(async move |this, cx| {
+            let (files, narrowed) = matching.await;
+            this.update(cx, |this, cx| {
+                this.match_task = None;
+                this.narrowed = narrowed.map(Arc::new);
+                this.show(files.into_iter().map(Choice::File).collect(), cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn show(&mut self, choices: Vec<Choice>, cx: &mut Context<Self>) {
+        self.choices = choices;
         self.selected = 0;
         self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
@@ -231,7 +288,7 @@ impl Palette {
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.confirm(ix, cx)));
                 Some(match self.choices.get(ix)? {
                     Choice::File(ix) => {
-                        let label = self.recent_entry(*ix).and_then(|entry| entry.2);
+                        let label = self.recent_entry(*ix).and_then(|entry| entry.label);
                         let file = &self.index.as_ref()?.files[*ix];
                         let dir = file.path[..file.name_start]
                             .trim_end_matches('/')
@@ -289,24 +346,104 @@ impl Palette {
     }
 }
 
-/// Finds each recent file in the index: (file, recency, label), by file.
-fn locate_recent(index: &FileIndex, recent: &[RecentFile]) -> Vec<RecentEntry> {
-    let mut entries: Vec<RecentEntry> = recent
+fn recent_entry(entries: &[RecentEntry], file: usize) -> Option<&RecentEntry> {
+    entries
+        .binary_search_by_key(&file, |entry| entry.file)
+        .ok()
+        .map(|ix| &entries[ix])
+}
+
+/// The best files for `query` (positions in `index`), and what it matched
+/// for narrowing the next query. When `narrowed` is given (an earlier query
+/// this one extends), only its matches are searched.
+fn match_files(
+    index: &FileIndex,
+    recent: &[RecentEntry],
+    narrowed: Option<&Narrowed>,
+    query: &str,
+) -> (Vec<usize>, Option<Narrowed>) {
+    let only = narrowed.map(|(_, files)| files);
+    let file_at = |position: usize| only.map_or(position, |files| files[position]);
+    let by_recency = query.trim().is_empty();
+    let count = only.map_or(index.files.len(), Vec::len);
+    let candidates = (0..count).map(|position| {
+        let ix = file_at(position);
+        let file = &index.files[ix];
+        fuzzy::Candidate {
+            path_lower: &file.path_lower,
+            name_start: file.name_start,
+            recent: recent_entry(recent, ix).map(|entry| {
+                if by_recency {
+                    entry.recency
+                } else {
+                    entry.frecency
+                }
+            }),
+        }
+    });
+    let (top, all) = fuzzy::match_paths_with_all(candidates, query, MAX_FILES);
+    let files = top.into_iter().map(|m| file_at(m.index)).collect();
+    // An empty query narrows nothing.
+    let narrowed =
+        (!by_recency).then(|| (query.to_owned(), all.into_iter().map(file_at).collect()));
+    (files, narrowed)
+}
+
+/// Finds the recent files (this session, in order) and the files used in
+/// earlier sessions in the index, and ranks them, sorted by file.
+fn locate_recent(
+    index: &FileIndex,
+    recent: &[RecentFile],
+    history: &[FileUse],
+    now: u64,
+) -> Vec<RecentEntry> {
+    let scores: HashMap<&Path, f64> = history
         .iter()
+        .map(|file| (file.path.as_path(), file.frecency(now)))
+        .collect();
+    let mut older: Vec<&FileUse> = history.iter().collect();
+    older.sort_by_key(|file| std::cmp::Reverse(file.last));
+    // Most recent first: this session's files (one opened or changed now is
+    // worth at least one use), then the rest of the history.
+    let candidates = recent
+        .iter()
+        .map(|file| {
+            let score = scores.get(file.path.as_path()).copied().unwrap_or(0.);
+            (&file.path, file.label, score.max(1.))
+        })
+        .chain(
+            older
+                .into_iter()
+                .map(|file| (&file.path, None, file.frecency(now))),
+        );
+    let mut seen = HashSet::new();
+    let mut entries: Vec<(usize, Option<&'static str>, f64)> = Vec::new();
+    for (path, label, score) in candidates {
+        if let Some(file) = index.position(path)
+            && seen.insert(file)
+        {
+            entries.push((file, label, score));
+        }
+    }
+    let mut by_score: Vec<usize> = (0..entries.len()).collect();
+    // Stable: equal scores stay most recent first.
+    by_score.sort_by(|&a, &b| entries[b].2.total_cmp(&entries[a].2));
+    let mut frecency = vec![0; entries.len()];
+    for (rank, &entry) in by_score.iter().enumerate() {
+        frecency[entry] = rank as u32;
+    }
+    let mut located: Vec<RecentEntry> = entries
+        .into_iter()
         .enumerate()
-        .filter_map(|(recency, file)| {
-            let relative = file.path.strip_prefix(&index.root).ok()?;
-            let relative = relative.to_string_lossy().replace('\\', "/");
-            let ix = index
-                .files
-                .binary_search_by(|file| (*file.path).cmp(relative.as_str()))
-                .ok()?;
-            Some((ix, recency as u32, file.label))
+        .map(|(recency, (file, label, _))| RecentEntry {
+            file,
+            recency: recency as u32,
+            frecency: frecency[recency],
+            label,
         })
         .collect();
-    entries.sort_unstable_by_key(|entry| entry.0);
-    entries.dedup_by_key(|entry| entry.0);
-    entries
+    located.sort_unstable_by_key(|entry| entry.file);
+    located
 }
 
 /// A pasted absolute path inside the project, as a path relative to it.
@@ -350,6 +487,11 @@ impl Render for Palette {
             .on_action(cx.listener(|this, _: &editor::MoveDown, _, cx| this.move_selection(1, cx)))
             .on_action(cx.listener(|this, _: &editor::MoveUp, _, cx| this.move_selection(-1, cx)))
             .on_action(cx.listener(|this, _: &editor::Newline, _, cx| {
+                // Enter right after typing opens the best match for what
+                // was typed, not for the query before it.
+                if this.match_task.is_some() {
+                    this.match_query(true, cx);
+                }
                 let selected = this.selected;
                 this.confirm(selected, cx)
             }))
@@ -403,6 +545,15 @@ mod tests {
         )
     }
 
+    fn entry(file: usize, recency: u32, frecency: u32, label: Option<&'static str>) -> RecentEntry {
+        RecentEntry {
+            file,
+            recency,
+            frecency,
+            label,
+        }
+    }
+
     #[test]
     fn locates_recent_files_in_the_index() {
         let index = index();
@@ -417,8 +568,41 @@ mod tests {
         });
         // Sorted: README.md, src/a.rs, src/b.rs.
         assert_eq!(
-            locate_recent(&index, &recent),
-            [(0, 2, None), (2, 0, Some("open"))]
+            locate_recent(&index, &recent, &[], 0),
+            [entry(0, 1, 1, None), entry(2, 0, 0, Some("open"))]
+        );
+    }
+
+    #[test]
+    fn ranks_by_recency_and_by_use() {
+        let index = index();
+        let day = 24 * 60 * 60;
+        let now = 10 * day;
+        let used = |path: &str, score: f64, last: u64| FileUse {
+            path: PathBuf::from(path),
+            score,
+            last,
+        };
+        // a.rs: used a lot yesterday. README.md: once, an hour ago.
+        let history = [
+            used("/srv/app/src/a.rs", 10., now - day),
+            used("/srv/app/README.md", 1., now - 3600),
+            used("/srv/app/gone.rs", 50., now),
+        ];
+        // b.rs: opened this session, never before.
+        let recent = [RecentFile {
+            path: PathBuf::from("/srv/app/src/b.rs"),
+            label: None,
+        }];
+        assert_eq!(
+            locate_recent(&index, &recent, &history, now),
+            [
+                // README.md: second most recent, tied on use with b.rs.
+                entry(0, 1, 2, None),
+                // a.rs: least recent, most used.
+                entry(1, 2, 0, None),
+                entry(2, 0, 1, None),
+            ]
         );
     }
 
