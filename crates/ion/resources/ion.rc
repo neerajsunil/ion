@@ -1,0 +1,2 @@
+// GPUI loads resource 1 as the window and taskbar icon.
+1 ICON "ion.ico"

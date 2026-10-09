@@ -1,0 +1,72 @@
+name: Linux server binaries
+
+on:
+  push:
+    branches: [main]
+    tags: ['server-v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Test server on Linux
+        run: cargo test -p ion_server -p ion_remote_protocol
+      - name: Cross compiler
+        run: pip install cargo-zigbuild==0.23.4 ziglang==0.16.0
+      - name: Build static server
+        run: cargo zigbuild -p ion_server --release --target ${{ matrix.target }}
+      - name: Execute release binary
+        run: target/${{ matrix.target }}/release/ion-server --version
+      - name: Test persistent RPC and filesystem notifications
+        run: python scripts/test-server.py target/${{ matrix.target }}/release/ion-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/ion-server
+
+  package:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: target/downloads
+      - name: Package release files
+        run: |
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            mkdir -p target/$target/release
+            cp target/downloads/$target/ion-server target/$target/release/ion-server
+          done
+          python scripts/package-server.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-dist
+          path: target/server-dist/*
+      - name: Publish matching versioned release
+        if: startsWith(github.ref, 'refs/tags/server-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          test "$GITHUB_REF_NAME" = "server-v$version"
+          gh release create "$GITHUB_REF_NAME" target/server-dist/* --title "Ion remote server $version" --notes-file docs/server-release-notes.md --latest=false

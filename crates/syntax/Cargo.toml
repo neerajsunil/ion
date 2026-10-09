@@ -1,0 +1,37 @@
+[package]
+name = "ion_syntax"
+description = "Syntax highlighting: language detection, background parsing and highlight queries (tree-sitter). No UI dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ropey.workspace = true
+streaming-iterator.workspace = true
+text.workspace = true
+tree-sitter-bash.workspace = true
+tree-sitter-c-sharp.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-css.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-html.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-json.workspace = true
+tree-sitter-lua.workspace = true
+tree-sitter-md.workspace = true
+tree-sitter-php.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-ruby.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-swift.workspace = true
+tree-sitter-toml-ng.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-yaml.workspace = true
+tree-sitter.workspace = true

@@ -1,0 +1,28 @@
+# Watch mode for development: `bacon` (checks), `bacon run`, `bacon test`.
+# Install once with `cargo install --locked bacon`.
+default_job = "check"
+
+[jobs.check]
+command = ["cargo", "check", "--workspace", "--all-targets"]
+need_stdout = false
+
+[jobs.clippy]
+command = ["cargo", "clippy", "--workspace", "--all-targets"]
+need_stdout = false
+
+[jobs.test]
+command = ["cargo", "test", "--workspace"]
+need_stdout = true
+
+# Rebuilds and relaunches Ion every time a file is saved.
+[jobs.run]
+command = ["cargo", "run", "-p", "ion"]
+need_stdout = true
+allow_warnings = true
+background = false
+on_change_strategy = "kill_then_restart"
+
+[keybindings]
+r = "job:run"
+t = "job:test"
+c = "job:clippy"

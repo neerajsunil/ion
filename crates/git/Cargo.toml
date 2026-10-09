@@ -1,0 +1,15 @@
+[package]
+name = "ion_git"
+description = "Git integration: status, diffs, blame, history and commits, using the git CLI. No UI dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+remote.workspace = true
+imara-diff.workspace = true

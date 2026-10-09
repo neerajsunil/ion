@@ -1,0 +1,29 @@
+[package]
+name = "ion"
+description = "The lightweight IDE built around your terminal agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ion"
+path = "src/main.rs"
+
+[dependencies]
+editor.workspace = true
+settings.workspace = true
+file_tree.workspace = true
+gpui.workspace = true
+remote.workspace = true
+terminal.workspace = true
+theme.workspace = true
+ui.workspace = true
+workspace.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true

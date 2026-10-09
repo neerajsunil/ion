@@ -1,0 +1,110 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/ion"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+editor = { path = "crates/editor", package = "ion_editor" }
+file_tree = { path = "crates/file_tree", package = "ion_file_tree" }
+fuzzy = { path = "crates/fuzzy", package = "ion_fuzzy" }
+bridge = { path = "crates/bridge", package = "ion_bridge" }
+git = { path = "crates/git", package = "ion_git" }
+project = { path = "crates/project", package = "ion_project", default-features = false }
+remote = { path = "crates/remote", package = "ion_remote" }
+remote_protocol = { path = "crates/remote_protocol", package = "ion_remote_protocol" }
+settings = { path = "crates/settings", package = "ion_settings" }
+syntax = { path = "crates/syntax", package = "ion_syntax" }
+terminal = { path = "crates/terminal", package = "ion_terminal" }
+text = { path = "crates/text", package = "ion_text" }
+theme = { path = "crates/theme", package = "ion_theme" }
+ui = { path = "crates/ui", package = "ion_ui" }
+workspace = { path = "crates/workspace", package = "ion_workspace" }
+
+# External crates
+alacritty_terminal = "0.26"
+embed-resource = "3.0.12"
+futures = "0.3"
+gpui = "0.2.2"
+imara-diff = { version = "0.1.8", default-features = false }
+ropey = "1.6"
+ignore = "0.4.33"
+notify = "8.2.0"
+# Must match the version alacritty_terminal uses: its PTY trait takes these types.
+polling = "3"
+pulldown-cmark = { version = "0.13", default-features = false }
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+base64 = "0.22"
+getrandom = "0.3"
+sha1_smol = "1"
+sha2 = "0.10"
+tempfile = "3"
+pty-process = { version = "0.5.3", default-features = false }
+rustix = { version = "1", default-features = false, features = ["std", "process"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# The background thread pool is already a multithreaded COM apartment.
+trash = { version = "5.2.9", default-features = false, features = ["coinit_multithreaded"] }
+streaming-iterator = "0.1.9"
+tree-sitter = "0.27.0"
+
+# Syntax highlighting grammars
+tree-sitter-bash = "0.25.1"
+tree-sitter-c = "0.24.2"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-css = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-html = "0.23.2"
+tree-sitter-java = "0.23.5"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-json = "0.24.8"
+tree-sitter-lua = "0.5.0"
+tree-sitter-md = "0.5.3"
+tree-sitter-php = "0.25.1"
+tree-sitter-python = "0.25.0"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-rust = "0.24.2"
+tree-sitter-swift = "0.7.4"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-yaml = "0.7.2"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+
+# Dev builds: our crates compile fast and unoptimized for quick rebuilds,
+# dependencies (GPUI etc.) are optimized once and cached so the app stays
+# responsive while developing.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# `cargo build --profile profiling`: release speed with symbols for profilers.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

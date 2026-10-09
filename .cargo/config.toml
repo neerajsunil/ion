@@ -1,0 +1,14 @@
+# Target only hardware from the last ~5 years.
+# x86-64-v2 (SSE4.2, POPCNT) is required by Windows 11 24H2, so it is safe for
+# every machine Ion supports. v3 (AVX2) is not: some Win11 Celeron/Pentium chips lack it.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+rustflags = ["-C", "target-cpu=x86-64-v2"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=apple-m1"]
+
+[alias]
+dev = "run -p ion"
+t = "test --workspace"
+lint = "clippy --workspace --all-targets -- -D warnings"

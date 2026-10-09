@@ -1,0 +1,24 @@
+# Build output
+/target
+*.pdb
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor and tool settings
+.vscode/
+.idea/
+.zed/
+.claude/
+*.swp
+*~
+
+# Local scratch
+*.log
+*.profraw
+.env
+
+# Throwaway design mockups
+/docs/design/

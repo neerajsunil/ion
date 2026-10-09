@@ -1,0 +1,27 @@
+[package]
+name = "ion_server"
+description = "Minimal native server for remote Ion workspaces."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ion-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+project = { workspace = true, default-features = false }
+remote_protocol.workspace = true
+serde_json.workspace = true
+notify.workspace = true
+ignore.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+pty-process.workspace = true
+rustix.workspace = true

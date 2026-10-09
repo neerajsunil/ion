@@ -1,0 +1,20 @@
+name: Feature request
+description: Suggest an idea for Ion
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ion is deliberately minimal. Please read docs/vision.md first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true

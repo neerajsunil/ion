@@ -1,0 +1,22 @@
+[package]
+name = "ion_editor"
+description = "Code editor view."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+git.workspace = true
+gpui.workspace = true
+ui.workspace = true
+project = { workspace = true, features = ["remote"] }
+regex.workspace = true
+settings.workspace = true
+syntax.workspace = true
+text.workspace = true
+theme.workspace = true
