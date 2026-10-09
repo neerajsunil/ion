@@ -5,6 +5,6 @@
 mod buffer;
 mod packed;
 
-pub use buffer::{Buffer, EditBatch, Selection, TAB, TextEdit};
+pub use buffer::{Buffer, EditBatch, IndentRules, Selection, TAB, TextEdit};
 pub use packed::{Packable, Packed, pack};
 pub use ropey::Rope;

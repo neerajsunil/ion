@@ -115,6 +115,9 @@ pub struct Settings {
     pub trim_trailing_whitespace: bool,
     /// End files with a line break when saving.
     pub insert_final_newline: bool,
+    /// Run the language's formatter (rustfmt, Prettier...) when saving with
+    /// Ctrl+S. Auto save never formats.
+    pub format_on_save: bool,
     /// Spaces per indent (Tab inserts this many) and the width of tab characters.
     pub tab_size: u32,
     pub auto_save: AutoSave,
@@ -158,6 +161,7 @@ impl Default for Settings {
             auto_close_brackets: true,
             trim_trailing_whitespace: false,
             insert_final_newline: false,
+            format_on_save: false,
             tab_size: 4,
             auto_save: AutoSave::Off,
             word_wrap: WordWrap::Prose,

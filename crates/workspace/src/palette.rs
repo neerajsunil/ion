@@ -1,5 +1,5 @@
-//! The palette: find a file by name (Ctrl+P), or a command after ">"
-//! (Ctrl+Shift+P). With no query, recently used and agent-changed files come
+//! The palette: find a file by name (Ctrl+P), a command after ">"
+//! (Ctrl+Shift+P), or a symbol in the current file after "@" (Ctrl+Shift+O). With no query, recently used and agent-changed files come
 //! first; among equally good matches, the most used ones (frecency) win. A
 //! pasted `path:line:column` opens at that position.
 
@@ -15,6 +15,7 @@ use gpui::{
     UniformListScrollHandle, Window, actions, div, prelude::FluentBuilder, px, uniform_list,
 };
 use project::FileIndex;
+use syntax::Symbol;
 use ui::IconName;
 
 use crate::commands::{self, Command};
@@ -38,6 +39,9 @@ pub enum PaletteEvent {
     /// A file, and a zero-based (line, column) to put the cursor at.
     OpenFile(PathBuf, Option<(usize, usize)>),
     Run(Box<dyn Action>),
+    /// A symbol in the editor the palette was opened from: zero-based
+    /// (line, column).
+    GoTo(Entity<Editor>, (usize, usize)),
     Dismissed,
 }
 
@@ -65,6 +69,17 @@ type Narrowed = (String, Vec<usize>);
 enum Choice {
     File(usize),
     Command(usize),
+    Symbol(usize),
+}
+
+/// The symbols of the editor the palette was opened from.
+enum Symbols {
+    NoFile,
+    /// Dropping it stops the search.
+    Loading {
+        _task: Task<()>,
+    },
+    Ready(Vec<Symbol>),
 }
 
 pub struct Palette {
@@ -86,6 +101,10 @@ pub struct Palette {
     commands: Vec<Command>,
     /// Shortcut text per command, looked up once when opened.
     shortcuts: Vec<Option<SharedString>>,
+    /// The editor the palette was opened from, for symbols.
+    editor: Option<Entity<Editor>>,
+    /// Found the first time "@" is typed.
+    symbols: Option<Symbols>,
     choices: Vec<Choice>,
     selected: usize,
     scroll_handle: UniformListScrollHandle,
@@ -95,11 +114,14 @@ pub struct Palette {
 impl EventEmitter<PaletteEvent> for Palette {}
 
 impl Palette {
-    /// `initial` is "" for files, ">" for commands.
+    /// `initial` is "" for files, ">" for commands, "@" for symbols in
+    /// `editor`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         index: Option<Arc<FileIndex>>,
         recent: Vec<RecentFile>,
         history: Vec<FileUse>,
+        editor: Option<Entity<Editor>>,
         initial: &str,
         remote: bool,
         window: &mut Window,
@@ -107,7 +129,7 @@ impl Palette {
     ) -> Self {
         let query = cx.new(|cx| {
             let mut input = Editor::single_line(
-                "Search files by name or path:line — type > for commands",
+                "Search files by name or path:line — > for commands, @ for symbols",
                 cx,
             );
             input.set_text(initial, cx);
@@ -137,6 +159,8 @@ impl Palette {
             position: None,
             commands,
             shortcuts,
+            editor,
+            symbols: None,
             choices: Vec::new(),
             selected: 0,
             scroll_handle: UniformListScrollHandle::new(),
@@ -172,6 +196,35 @@ impl Palette {
         text.strip_prefix('>').map(str::to_owned)
     }
 
+    fn symbol_query(&self, cx: &gpui::App) -> Option<String> {
+        let text = self.query.read(cx).text();
+        text.strip_prefix('@').map(str::to_owned)
+    }
+
+    /// Starts finding the editor's symbols, once.
+    fn load_symbols(&mut self, cx: &mut Context<Self>) {
+        if self.symbols.is_some() {
+            return;
+        }
+        let task = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.read(cx).symbols(cx));
+        self.symbols = Some(match task {
+            Some(task) => Symbols::Loading {
+                _task: cx.spawn(async move |this, cx| {
+                    let symbols = task.await;
+                    this.update(cx, |this, cx| {
+                        this.symbols = Some(Symbols::Ready(symbols));
+                        this.update_choices(cx);
+                    })
+                    .ok();
+                }),
+            },
+            None => Symbols::NoFile,
+        });
+    }
+
     fn update_choices(&mut self, cx: &mut Context<Self>) {
         self.match_query(false, cx);
     }
@@ -186,6 +239,18 @@ impl Palette {
                 .into_iter()
                 .map(Choice::Command)
                 .collect();
+            self.show(choices, cx);
+            return;
+        }
+        if let Some(query) = self.symbol_query(cx) {
+            self.load_symbols(cx);
+            let choices = match &self.symbols {
+                Some(Symbols::Ready(symbols)) => matching_symbols(symbols, &query)
+                    .into_iter()
+                    .map(Choice::Symbol)
+                    .collect(),
+                _ => Vec::new(),
+            };
             self.show(choices, cx);
             return;
         }
@@ -261,6 +326,13 @@ impl Palette {
                 cx.emit(PaletteEvent::Run(
                     self.commands[*command].action.boxed_clone(),
                 ));
+            }
+            Some(Choice::Symbol(symbol)) => {
+                if let (Some(editor), Some(Symbols::Ready(symbols))) = (&self.editor, &self.symbols)
+                {
+                    let symbol = &symbols[*symbol];
+                    cx.emit(PaletteEvent::GoTo(editor.clone(), (symbol.row, symbol.col)));
+                }
             }
             None => {}
         }
@@ -340,10 +412,69 @@ impl Palette {
                         )
                         .children(shortcut.map(ui::kbd))
                     }
+                    Choice::Symbol(symbol) => {
+                        let Some(Symbols::Ready(symbols)) = &self.symbols else {
+                            return None;
+                        };
+                        let symbol = &symbols[*symbol];
+                        // Nesting shows only in the full outline.
+                        let nested = self.symbol_query(cx).is_some_and(|q| q.trim().is_empty());
+                        let indent = if nested { symbol.depth.min(6) } else { 0 };
+                        row.child(div().flex_none().w(px(14. * indent as f32)))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme::text())
+                                    .child(symbol.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(theme::ui_font_size_small())
+                                    .text_color(theme::text_faint())
+                                    .child(symbol.kind.label()),
+                            )
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .flex_none()
+                                    .text_size(theme::ui_font_size_small())
+                                    .text_color(theme::text_muted())
+                                    .child(format!("{}", symbol.row + 1)),
+                            )
+                    }
                 })
             })
             .collect()
     }
+}
+
+/// Positions of the symbols matching `query`: all of them in document order
+/// for an empty query, else names containing it (ignoring case), exact
+/// names first, then names starting with it, then the rest, each in
+/// document order.
+fn matching_symbols(symbols: &[Symbol], query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    let mut found: Vec<(u8, usize)> = symbols
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, symbol)| {
+            let name = symbol.name.to_lowercase();
+            let rank = if name == query {
+                0
+            } else if name.starts_with(&query) {
+                1
+            } else if name.contains(&query) {
+                2
+            } else {
+                return None;
+            };
+            Some((rank, ix))
+        })
+        .collect();
+    found.sort_by_key(|(rank, ix)| (*rank, *ix));
+    found.into_iter().map(|(_, ix)| ix).collect()
 }
 
 fn recent_entry(entries: &[RecentEntry], file: usize) -> Option<&RecentEntry> {
@@ -468,6 +599,13 @@ impl Render for Palette {
         let rows = self.choices.len().min(MAX_VISIBLE_ROWS);
         let empty = if self.command_query(cx).is_some() {
             "No matching commands"
+        } else if self.symbol_query(cx).is_some() {
+            match &self.symbols {
+                Some(Symbols::NoFile) => "Open a code file to see its symbols",
+                Some(Symbols::Loading { .. }) | None => "Finding symbols…",
+                Some(Symbols::Ready(symbols)) if symbols.is_empty() => "No symbols in this file",
+                Some(Symbols::Ready(_)) => "No matching symbols",
+            }
         } else if self.index.is_none() {
             "Indexing files…"
         } else {
@@ -604,6 +742,26 @@ mod tests {
                 entry(2, 0, 1, None),
             ]
         );
+    }
+
+    #[test]
+    fn matches_symbols_best_first_in_document_order() {
+        let symbol = |name: &str| Symbol {
+            name: name.to_owned(),
+            kind: syntax::SymbolKind::Function,
+            row: 0,
+            col: 0,
+            depth: 0,
+        };
+        let symbols = [
+            symbol("load_file"),
+            symbol("Load"),
+            symbol("reload"),
+            symbol("loader"),
+        ];
+        assert_eq!(matching_symbols(&symbols, ""), [0, 1, 2, 3]);
+        assert_eq!(matching_symbols(&symbols, "load"), [1, 0, 3, 2]);
+        assert_eq!(matching_symbols(&symbols, "x"), [] as [usize; 0]);
     }
 
     #[test]

@@ -142,6 +142,10 @@ impl Workspace {
                         this.status = Some(format!("Save failed: {err}").into());
                         cx.notify();
                     }
+                    EditorEvent::FormatFailed(err) => {
+                        this.status = Some(format!("Saved without formatting: {err}").into());
+                        cx.notify();
+                    }
                     EditorEvent::DiffRowActivated(row) => {
                         this.jump_from_diff(editor, *row, window, cx)
                     }

@@ -72,6 +72,7 @@ actions!(
         UseLightTheme,
         UseSystemTheme,
         GoToLine,
+        GoToSymbol,
         GitFetch,
         DiscardAllChanges,
         GitPull,
@@ -146,6 +147,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-,", OpenSettings, CONTEXT),
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("ctrl-g", GoToLine, CONTEXT),
+        KeyBinding::new("secondary-shift-o", GoToSymbol, CONTEXT),
         KeyBinding::new("secondary-shift-t", ReopenClosedTab, CONTEXT),
         KeyBinding::new("secondary-=", ZoomIn, CONTEXT),
         KeyBinding::new("secondary-+", ZoomIn, CONTEXT),
@@ -707,7 +709,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Task<bool> {
         if editor.read(cx).path().is_some() {
-            editor.update(cx, |editor, cx| editor.save(cx))
+            editor.update(cx, |editor, cx| editor.format_and_save(cx))
         } else {
             self.save_editor_as(editor, window, cx)
         }
@@ -1058,7 +1060,8 @@ impl Workspace {
             .collect()
     }
 
-    /// Opens the palette for files ("") or commands (">"), or closes it.
+    /// Opens the palette for files (""), commands (">") or symbols ("@"), or
+    /// closes it.
     fn toggle_palette(&mut self, prefix: &str, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.modal, Some(Modal::Palette(_))) {
             self.dismiss_modal(window, cx);
@@ -1068,7 +1071,9 @@ impl Workspace {
         let remote = self.filesystem.remote().is_some();
         let recent = self.palette_recent_files(cx);
         let history = self.file_history(cx);
-        let palette = cx.new(|cx| Palette::new(index, recent, history, prefix, remote, window, cx));
+        let editor = self.active_editor();
+        let palette =
+            cx.new(|cx| Palette::new(index, recent, history, editor, prefix, remote, window, cx));
         let subscription =
             cx.subscribe_in(&palette, window, |this, _, event, window, cx| match event {
                 PaletteEvent::OpenFile(path, position) => {
@@ -1083,6 +1088,12 @@ impl Workspace {
                     // editor or terminal it was opened from.
                     this.dismiss_modal(window, cx);
                     window.dispatch_action(action, cx);
+                }
+                PaletteEvent::GoTo(editor, point) => {
+                    let (editor, point) = (editor.clone(), *point);
+                    this.dismiss_modal(window, cx);
+                    editor.update(cx, |editor, cx| editor.select_range(point, point, cx));
+                    window.focus(&editor.focus_handle(cx));
                 }
                 PaletteEvent::Dismissed => this.dismiss_modal(window, cx),
             });
@@ -1683,6 +1694,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::find))
             .on_action(cx.listener(Self::find_replace))
             .on_action(cx.listener(|this, _: &GoToLine, window, cx| this.go_to_line(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &GoToSymbol, window, cx| {
+                    this.toggle_palette("@", window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &GitFetch, _, cx| {
                 this.git_panel.update(cx, |panel, cx| {
                     panel.sync(crate::git_panel::Sync::Fetch, cx)

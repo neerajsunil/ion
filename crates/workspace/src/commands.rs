@@ -82,6 +82,7 @@ fn all() -> Vec<Command> {
         command("File", "Close All Tabs", Some(I::X), CloseAllTabs),
         command("File", "Reopen Closed Tab", Some(I::Undo2), ReopenClosedTab),
         command("Go", "Go to Line…", None, GoToLine),
+        command("Go", "Go to Symbol in File…", None, GoToSymbol),
         command("Git", "Fetch", Some(I::RefreshCw), GitFetch),
         command("Git", "Pull", Some(I::ArrowDown), GitPull),
         command("Git", "Push", Some(I::ArrowUp), GitPush),

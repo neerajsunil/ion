@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 
 mod cursors;
 mod folds;
+mod indent;
 mod lines;
+
+pub use indent::IndentRules;
 
 const UNDO_GROUP_TIMEOUT: Duration = Duration::from_millis(800);
 pub const TAB: &str = "    ";

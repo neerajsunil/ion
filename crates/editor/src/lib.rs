@@ -10,6 +10,7 @@ mod hidden;
 mod highlighting;
 mod input;
 mod layout;
+mod scrollbar;
 mod split_diff;
 mod wrap;
 

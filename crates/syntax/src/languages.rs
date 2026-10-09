@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use text::IndentRules;
 use tree_sitter::Query;
 
 use crate::Highlight;
@@ -17,7 +18,18 @@ struct LanguageDef {
     /// match the same node, so a base language's query goes first and the
     /// query that extends it after.
     highlights: &'static [&'static str],
+    /// Tags query sources (`@definition.*` and `@name` captures), for the
+    /// symbols in a file. Empty for languages without definitions.
+    tags: &'static [&'static str],
 }
+
+const SHELL_TAGS: &str = "(function_definition name: (word) @name) @definition.function";
+
+/// Headings, captured with their section so subsections nest.
+const MARKDOWN_TAGS: &str = "
+(section (atx_heading heading_content: (_) @name)) @definition.heading
+(section (setext_heading heading_content: (_) @name)) @definition.heading
+";
 
 const LANGUAGES: &[LanguageDef] = &[
     LanguageDef {
@@ -26,6 +38,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_rust::LANGUAGE.into(),
         highlights: &[tree_sitter_rust::HIGHLIGHTS_QUERY],
+        tags: &[tree_sitter_rust::TAGS_QUERY],
     },
     LanguageDef {
         name: "JavaScript",
@@ -36,6 +49,7 @@ const LANGUAGES: &[LanguageDef] = &[
             tree_sitter_javascript::HIGHLIGHT_QUERY,
             tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
         ],
+        tags: &[tree_sitter_javascript::TAGS_QUERY],
     },
     LanguageDef {
         name: "TypeScript",
@@ -45,6 +59,10 @@ const LANGUAGES: &[LanguageDef] = &[
         highlights: &[
             tree_sitter_javascript::HIGHLIGHT_QUERY,
             tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        ],
+        tags: &[
+            tree_sitter_javascript::TAGS_QUERY,
+            tree_sitter_typescript::TAGS_QUERY,
         ],
     },
     LanguageDef {
@@ -57,6 +75,10 @@ const LANGUAGES: &[LanguageDef] = &[
             tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
             tree_sitter_typescript::HIGHLIGHTS_QUERY,
         ],
+        tags: &[
+            tree_sitter_javascript::TAGS_QUERY,
+            tree_sitter_typescript::TAGS_QUERY,
+        ],
     },
     LanguageDef {
         name: "Python",
@@ -64,6 +86,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_python::LANGUAGE.into(),
         highlights: &[tree_sitter_python::HIGHLIGHTS_QUERY],
+        tags: &[tree_sitter_python::TAGS_QUERY],
     },
     LanguageDef {
         name: "Go",
@@ -71,6 +94,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_go::LANGUAGE.into(),
         highlights: &[tree_sitter_go::HIGHLIGHTS_QUERY],
+        tags: &[tree_sitter_go::TAGS_QUERY],
     },
     LanguageDef {
         name: "C",
@@ -78,6 +102,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_c::LANGUAGE.into(),
         highlights: &[tree_sitter_c::HIGHLIGHT_QUERY],
+        tags: &[tree_sitter_c::TAGS_QUERY],
     },
     LanguageDef {
         name: "C++",
@@ -88,6 +113,7 @@ const LANGUAGES: &[LanguageDef] = &[
             tree_sitter_c::HIGHLIGHT_QUERY,
             tree_sitter_cpp::HIGHLIGHT_QUERY,
         ],
+        tags: &[tree_sitter_cpp::TAGS_QUERY],
     },
     LanguageDef {
         name: "C#",
@@ -95,6 +121,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_c_sharp::LANGUAGE.into(),
         highlights: &[tree_sitter_c_sharp::HIGHLIGHTS_QUERY],
+        tags: &[tree_sitter_c_sharp::TAGS_QUERY],
     },
     LanguageDef {
         name: "Java",
@@ -102,6 +129,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_java::LANGUAGE.into(),
         highlights: &[tree_sitter_java::HIGHLIGHTS_QUERY],
+        tags: &[tree_sitter_java::TAGS_QUERY],
     },
     LanguageDef {
         name: "JSON",
@@ -109,6 +137,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[".prettierrc", ".babelrc", ".eslintrc"],
         grammar: || tree_sitter_json::LANGUAGE.into(),
         highlights: &[tree_sitter_json::HIGHLIGHTS_QUERY],
+        tags: &[],
     },
     LanguageDef {
         name: "HTML",
@@ -116,6 +145,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_html::LANGUAGE.into(),
         highlights: &[tree_sitter_html::HIGHLIGHTS_QUERY],
+        tags: &[],
     },
     LanguageDef {
         name: "CSS",
@@ -123,6 +153,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_css::LANGUAGE.into(),
         highlights: &[tree_sitter_css::HIGHLIGHTS_QUERY],
+        tags: &[],
     },
     LanguageDef {
         name: "Shell",
@@ -130,6 +161,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[".bashrc", ".bash_profile", ".zshrc", ".profile"],
         grammar: || tree_sitter_bash::LANGUAGE.into(),
         highlights: &[tree_sitter_bash::HIGHLIGHT_QUERY],
+        tags: &[SHELL_TAGS],
     },
     LanguageDef {
         name: "TOML",
@@ -137,6 +169,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &["Cargo.lock"],
         grammar: || tree_sitter_toml_ng::LANGUAGE.into(),
         highlights: &[tree_sitter_toml_ng::HIGHLIGHTS_QUERY],
+        tags: &[],
     },
     LanguageDef {
         name: "YAML",
@@ -144,6 +177,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_yaml::LANGUAGE.into(),
         highlights: &[tree_sitter_yaml::HIGHLIGHTS_QUERY],
+        tags: &[],
     },
     LanguageDef {
         name: "Markdown",
@@ -151,6 +185,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_md::LANGUAGE.into(),
         highlights: &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
+        tags: &[MARKDOWN_TAGS],
     },
     LanguageDef {
         name: "PHP",
@@ -158,6 +193,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_php::LANGUAGE_PHP.into(),
         highlights: &[tree_sitter_php::HIGHLIGHTS_QUERY],
+        tags: &[tree_sitter_php::TAGS_QUERY],
     },
     LanguageDef {
         name: "Ruby",
@@ -165,6 +201,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &["Gemfile", "Rakefile"],
         grammar: || tree_sitter_ruby::LANGUAGE.into(),
         highlights: &[tree_sitter_ruby::HIGHLIGHTS_QUERY],
+        tags: &[tree_sitter_ruby::TAGS_QUERY],
     },
     LanguageDef {
         name: "Lua",
@@ -172,6 +209,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_lua::LANGUAGE.into(),
         highlights: &[tree_sitter_lua::HIGHLIGHTS_QUERY],
+        tags: &[tree_sitter_lua::TAGS_QUERY],
     },
     LanguageDef {
         name: "Swift",
@@ -179,6 +217,7 @@ const LANGUAGES: &[LanguageDef] = &[
         file_names: &[],
         grammar: || tree_sitter_swift::LANGUAGE.into(),
         highlights: &[tree_sitter_swift::HIGHLIGHTS_QUERY],
+        tags: &[tree_sitter_swift::TAGS_QUERY],
     },
 ];
 
@@ -207,6 +246,23 @@ impl LanguageId {
             "CSS" => ("/* ", " */"),
             "JSON" => return None,
             _ => ("// ", ""),
+        })
+    }
+
+    /// How Enter indents. `None` for prose (Markdown), which keeps the
+    /// line's indentation and nothing more.
+    pub fn indent_rules(self) -> Option<IndentRules> {
+        Some(match self.name() {
+            "Markdown" => return None,
+            "Python" => IndentRules {
+                colon_opens: true,
+                block_enders: &["return", "pass", "break", "continue", "raise"],
+            },
+            "YAML" => IndentRules {
+                colon_opens: true,
+                block_enders: &[],
+            },
+            _ => IndentRules::default(),
         })
     }
 
@@ -240,6 +296,44 @@ pub struct Language {
     pub(crate) query: Query,
     /// Highlight kind for each capture index in `query`.
     pub(crate) capture_highlights: Vec<Option<Highlight>>,
+    /// Compiled on first use: most files are never asked for their symbols.
+    tags: OnceLock<Option<Query>>,
+}
+
+impl Language {
+    /// The tags query, or `None` if the language has none (or it doesn't
+    /// compile, which the tests rule out).
+    pub(crate) fn tags_query(&self) -> Option<&Query> {
+        self.tags
+            .get_or_init(|| {
+                let sources = LANGUAGES[self.id.0].tags;
+                if sources.is_empty() {
+                    return None;
+                }
+                let mut query = Query::new(&self.grammar, &sources.join("\n")).ok()?;
+                // Doc comments are matched with `*` quantifiers; skipping
+                // them saves most of the query's work.
+                query.disable_capture("doc");
+                Some(query)
+            })
+            .as_ref()
+    }
+
+    /// Whether the language has a tags query.
+    pub fn has_symbols(&self) -> bool {
+        !LANGUAGES[self.id.0].tags.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tags_error(&self) -> Option<String> {
+        let sources = LANGUAGES[self.id.0].tags;
+        if sources.is_empty() {
+            return None;
+        }
+        Query::new(&self.grammar, &sources.join("\n"))
+            .err()
+            .map(|err| format!("{} tags query: {err}", LANGUAGES[self.id.0].name))
+    }
 }
 
 /// Loads a language, compiling its highlight query on first use (a few
@@ -265,6 +359,7 @@ pub fn load(id: LanguageId) -> Result<Arc<Language>, String> {
         grammar,
         query,
         capture_highlights,
+        tags: OnceLock::new(),
     });
     cache
         .lock()

@@ -7,6 +7,7 @@
 
 mod highlight;
 mod languages;
+mod symbols;
 
 use std::ops::Range;
 
@@ -17,6 +18,7 @@ use tree_sitter::{InputEdit, Node, Parser, Point, QueryCursor};
 
 pub use highlight::Highlight;
 pub use languages::{Language, LanguageId, detect, load};
+pub use symbols::{Symbol, SymbolKind, symbols};
 pub use tree_sitter::Tree;
 
 /// Ranges larger than this aren't highlighted (e.g. a giant minified line).

@@ -16,6 +16,7 @@ use crate::element::EditorElement;
 use crate::git_gutter::GitDiffState;
 use crate::highlighting::SyntaxState;
 use crate::layout::EditorLayout;
+use crate::scrollbar::ScrollbarState;
 use crate::wrap::WrapMap;
 
 /// Searches stop after this many matches.
@@ -25,6 +26,8 @@ pub enum EditorEvent {
     /// The text changed (typing, paste, undo, reload...).
     Edited,
     SaveFailed(String),
+    /// Format on save couldn't format the file (it was saved unformatted).
+    FormatFailed(String),
     /// A row of a diff view was double-clicked.
     DiffRowActivated(usize),
     /// The Revert button of a diff view's hunk header row was clicked.
@@ -107,6 +110,10 @@ pub struct Editor {
     pub(crate) scroll: Point<Pixels>,
     /// Scroll the cursor into view on the next frame.
     pub(crate) autoscroll: bool,
+    /// How far the widest line lets the content scroll right, as of the
+    /// last frame.
+    pub(crate) max_scroll_x: Pixels,
+    pub(crate) scrollbars: ScrollbarState,
     /// IME composition range (char offsets).
     pub(crate) marked_range: Option<Range<usize>>,
     is_selecting: bool,
@@ -157,6 +164,8 @@ impl Editor {
             wrap_goal: None,
             scroll: point(px(0.), px(0.)),
             autoscroll: false,
+            max_scroll_x: px(0.),
+            scrollbars: ScrollbarState::default(),
             marked_range: None,
             is_selecting: false,
             layout: None,
@@ -458,6 +467,53 @@ impl Editor {
         })
     }
 
+    /// Saves as the user asked to (Ctrl+S): first runs the language's
+    /// formatter if that setting is on. Formatting happens in the
+    /// background; if the text changes meanwhile, the formatted result is
+    /// dropped and the current text saved. A formatter error is reported
+    /// and the file saved as it is.
+    pub fn format_and_save(&mut self, cx: &mut Context<Self>) -> Task<bool> {
+        let Some(path) = self.path.clone() else {
+            return Task::ready(false);
+        };
+        if self.read_only || !settings::get(cx).format_on_save {
+            return self.save(cx);
+        }
+        let filesystem = self.filesystem.clone();
+        let rope = self.buffer.rope().clone();
+        let version = self.buffer.version();
+        let format = cx.background_spawn(async move {
+            let formatter = project::format::formatter_for(&filesystem, &path)?;
+            let text = rope.to_string();
+            Some(project::format::format(
+                &filesystem,
+                &formatter,
+                &path,
+                &text,
+            ))
+        });
+        cx.spawn(async move |this, cx| {
+            let formatted = format.await;
+            let Ok(save) = this.update(cx, |editor, cx| {
+                match formatted {
+                    Some(Ok(text)) if editor.buffer.version() == version => {
+                        editor.apply_text(&text, cx);
+                    }
+                    Some(Err(err))
+                        if !matches!(err, project::format::FormatError::NotInstalled) =>
+                    {
+                        cx.emit(EditorEvent::FormatFailed(err.to_string()));
+                    }
+                    _ => {}
+                }
+                editor.save(cx)
+            }) else {
+                return false;
+            };
+            save.await
+        })
+    }
+
     /// Takes the file's new contents from disk (e.g. after an agent edited it).
     /// Only the changed middle part is replaced, as one undoable step, so the
     /// cursor stays put and Ctrl+Z restores the previous version.
@@ -632,7 +688,7 @@ impl Editor {
             cx.propagate();
             return;
         }
-        self.save(cx).detach();
+        self.format_and_save(cx).detach();
     }
 
     // ---- search --------------------------------------------------------------
@@ -836,6 +892,9 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
+        if self.scrollbar_mouse_down(event.position, cx) {
+            return;
+        }
         if let Some(row) = self.fold_toggle_at(event.position) {
             self.toggle_fold_at(row, cx);
             return;
@@ -866,6 +925,9 @@ impl Editor {
         if !self.is_selecting || event.pressed_button != Some(MouseButton::Left) {
             self.update_hover_row(event.position, cx);
             self.update_gutter_hover(event.position, cx);
+            if self.scrollbars.drag.is_none() {
+                self.update_scrollbar_hover(Some(event.position), cx);
+            }
             return;
         }
         if let Some(offset) = self.offset_for_position(event.position) {
@@ -1081,8 +1143,9 @@ impl Editor {
         }
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.is_selecting = false;
+        self.scrollbar_mouse_up(cx);
     }
 
     fn on_scroll_wheel(
@@ -1105,8 +1168,15 @@ impl Editor {
         self.scroll -= delta;
         self.autoscroll = false;
         self.clamp_scroll();
-        // Keep the other side of a side-by-side diff in step this frame
-        // rather than one late, so its rows and buttons don't trail.
+        self.reveal_scrollbars(cx);
+        self.sync_partner_scroll(cx);
+        cx.notify();
+        cx.stop_propagation();
+    }
+
+    /// Keeps the other side of a side-by-side diff in step this frame
+    /// rather than one late, so its rows and buttons don't trail.
+    pub(crate) fn sync_partner_scroll(&mut self, cx: &mut Context<Self>) {
         if let Some(partner) = self.scroll_partner.as_ref().and_then(|p| p.upgrade()) {
             let y = self.scroll.y;
             partner.update(cx, |partner, cx| {
@@ -1118,8 +1188,6 @@ impl Editor {
                 }
             });
         }
-        cx.notify();
-        cx.stop_propagation();
     }
 
     /// Clamps `scroll` as prepaint will. Revert buttons and hit tests read it
@@ -1129,7 +1197,7 @@ impl Editor {
         let rows = self.wrap.row_count(self.buffer.line_count());
         let max_y = line_height * rows.saturating_sub(1) as f32;
         self.scroll.y = self.scroll.y.clamp(px(0.), max_y);
-        self.scroll.x = self.scroll.x.max(px(0.));
+        self.scroll.x = self.scroll.x.clamp(px(0.), self.max_scroll_x);
     }
 }
 
@@ -1239,7 +1307,14 @@ impl Render for Editor {
             .on_action(edit!(DeleteWordLeft, |b| b.delete_word_left()))
             .on_action(edit!(DeleteWordRight, |b| b.delete_word_right()))
             .on_action(multiline!(Newline, |this, cx| if !this.read_only {
-                this.update_buffer(cx, |b| b.for_each_selection(|b| b.newline()))
+                let rules = this.indent_rules();
+                let unit = settings::get(cx).indent_unit();
+                this.update_buffer(cx, |b| {
+                    b.for_each_selection(|b| match rules {
+                        Some(rules) => b.newline_indented(&unit, rules),
+                        None => b.newline(),
+                    })
+                })
             }))
             .on_action(multiline!(ToggleComment, |this, cx| if !this.read_only {
                 this.toggle_comment(cx)
@@ -1344,6 +1419,9 @@ impl Render for Editor {
                 if !hovered && this.gutter_hovered {
                     this.gutter_hovered = false;
                     cx.notify();
+                }
+                if !hovered {
+                    this.update_scrollbar_hover(None, cx);
                 }
             }))
             .on_action(cx.listener(Self::toggle_diff_layout))

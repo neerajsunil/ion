@@ -713,6 +713,21 @@ impl SettingsView {
                 cx,
             ),
         );
+        add(
+            Page::Files,
+            "When saving",
+            "Format on save",
+            "Run the language's formatter when you press Ctrl+S: rustfmt, gofmt, Ruff or Black, \
+             the project's Prettier, clang-format (with a .clang-format file), StyLua or shfmt. \
+             Auto save never formats.",
+            "format formatter prettier rustfmt black ruff gofmt beautify",
+            self.switch(
+                "format-on-save",
+                s.format_on_save,
+                |s, v| s.format_on_save = v,
+                cx,
+            ),
+        );
 
         // Terminal
         let mut shells: Vec<(SharedString, usize)> = vec![("System default".into(), 0)];

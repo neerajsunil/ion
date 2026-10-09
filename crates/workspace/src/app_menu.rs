@@ -91,6 +91,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Command Palette", CommandPalette),
                 MenuItem::action("Go to File…", ToggleFileFinder),
                 MenuItem::action("Go to Line…", GoToLine),
+                MenuItem::action("Go to Symbol in File…", GoToSymbol),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Explorer", ShowFiles),

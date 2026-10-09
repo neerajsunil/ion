@@ -7,14 +7,16 @@ use std::ops::Range;
 
 use git::LineChange;
 use gpui::{
-    App, Bounds, ContentMask, Element, ElementId, ElementInputHandler, Entity, FontWeight,
-    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels,
-    ShapedLine, Style, TextRun, Window, fill, font, point, px, relative, size,
+    App, Bounds, ContentMask, DispatchPhase, Element, ElementId, ElementInputHandler, Entity,
+    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
+    LayoutId, MouseMoveEvent, PaintQuad, Pixels, ShapedLine, Style, TextRun, Window, fill, font,
+    point, px, relative, size,
 };
 
 use crate::editor::DiffRowKind;
 use crate::highlighting::line_runs;
 use crate::layout::{DisplayLine, EditorLayout, VisibleLine};
+use crate::scrollbar::{Axis, SCROLLBAR_WIDTH, ScrollbarLayout};
 use crate::{DiffRow, Editor};
 use settings::{CursorStyle, LineNumbers};
 
@@ -64,6 +66,8 @@ pub(crate) struct PrepaintState {
     /// Placeholder text and its origin, for empty inputs.
     placeholder: Option<(gpui::Point<Pixels>, ShapedLine)>,
     cursors: Vec<PaintQuad>,
+    /// Shown scrollbar tracks, which take an arrow cursor.
+    scrollbar_hitboxes: Vec<Hitbox>,
 }
 
 impl IntoElement for EditorElement {
@@ -104,6 +108,47 @@ fn diff_digits(rows: &[DiffRow]) -> usize {
         .max()
         .unwrap_or(0);
     max.to_string().len().max(MIN_GUTTER_DIGITS)
+}
+
+impl EditorElement {
+    fn paint_scrollbars(
+        &self,
+        layout: &EditorLayout,
+        hitboxes: &[Hitbox],
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        for hitbox in hitboxes {
+            window.set_cursor_style(gpui::CursorStyle::Arrow, hitbox);
+        }
+        let state = &self.editor.read(cx).scrollbars;
+        for bar in &layout.scrollbars {
+            if !state.visible(bar.axis) {
+                continue;
+            }
+            let active =
+                state.hovered == Some(bar.axis) || state.drag.is_some_and(|(a, _)| a == bar.axis);
+            if active {
+                window.paint_quad(fill(bar.track, theme::hover_bg().opacity(0.6)));
+            }
+            let opacity = if active { 0.9 } else { 0.6 };
+            let radius = bar.thumb.size.width.min(bar.thumb.size.height) / 2.;
+            window.paint_quad(
+                fill(bar.thumb, theme::text_faint().opacity(opacity)).corner_radii(radius),
+            );
+        }
+        // Keep following the mouse when a drag leaves the editor.
+        if state.drag.is_some() {
+            let editor = self.editor.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                if phase == DispatchPhase::Bubble {
+                    editor.update(cx, |editor, cx| {
+                        editor.scrollbar_drag_to(event.position, cx)
+                    });
+                }
+            });
+        }
+    }
 }
 
 impl Element for EditorElement {
@@ -184,9 +229,14 @@ impl Element for EditorElement {
 
         // Soft wrap at the right edge, leaving room for the cursor.
         let wrap_cols = ((viewport_width / digit_width).floor() as usize).saturating_sub(1);
-        self.editor.update(cx, |editor, _| {
+        let widest_cols = self.editor.update(cx, |editor, _| {
             let cols = wraps.then_some(wrap_cols);
             editor.wrap.update(&editor.buffer, cols, tab_width);
+            if editor.wrap.wraps_lines() {
+                Some(0)
+            } else {
+                editor.scrollbars.widest_line(&editor.buffer, tab_width)
+            }
         });
         let editor = self.editor.read(cx);
         let buffer = &editor.buffer;
@@ -198,6 +248,8 @@ impl Element for EditorElement {
 
         // Resolve scrolling: keep the cursor visible after edits, then clamp.
         let mut scroll = editor.scroll;
+        // Room kept right of the cursor when scrolling sideways.
+        let margin = digit_width * 4.;
         let (cursor_row, cursor_col) = buffer.row_col(buffer.cursor());
         if editor.autoscroll {
             let cursor_top = line_height * wrap.display_row(cursor_row, cursor_col) as f32;
@@ -214,7 +266,6 @@ impl Element for EditorElement {
                 };
                 let shaped = shape(window, display.text.clone(), theme::text());
                 let cursor_x = shaped.x_for_index(display.byte_for_col(cursor_col));
-                let margin = digit_width * 4.;
                 if cursor_x < scroll.x + margin {
                     scroll.x = cursor_x - margin;
                 } else if cursor_x > scroll.x + viewport_width - margin {
@@ -225,11 +276,6 @@ impl Element for EditorElement {
         // Allow scrolling until the last line reaches the top of the viewport.
         let max_scroll_y = line_height * display_rows.saturating_sub(1) as f32;
         scroll.y = scroll.y.clamp(px(0.), max_scroll_y);
-        scroll.x = if wrapping {
-            px(0.)
-        } else {
-            scroll.x.max(px(0.))
-        };
 
         let first_display_row = (scroll.y / line_height).floor() as usize;
         let rows_in_view = (viewport_height / line_height).ceil() as usize + 1;
@@ -243,7 +289,6 @@ impl Element for EditorElement {
         let row_top = |display_row: usize| {
             bounds.top() + top_offset + line_height * display_row as f32 - scroll.y
         };
-        let line_origin_x = text_left - scroll.x;
 
         let first_row = wrap.segment(first_display_row).0;
         let last_row = if last_display_row > first_display_row {
@@ -410,6 +455,73 @@ impl Element for EditorElement {
                 shaped,
             });
         }
+
+        // Scroll right until the widest line's end (plus the cursor margin)
+        // reaches the right edge. Lines in view are measured exactly, in case
+        // wide characters make them longer than their columns.
+        let content_width = lines.iter().map(|line| line.shaped.width).fold(
+            match widest_cols {
+                Some(cols) => digit_width * cols as f32,
+                None => editor.scrollbars.widest_drawn,
+            },
+            Pixels::max,
+        );
+        let max_scroll_x = if wrapping {
+            px(0.)
+        } else {
+            (content_width + margin - viewport_width).max(px(0.))
+        };
+        scroll.x = scroll.x.clamp(px(0.), max_scroll_x);
+        let line_origin_x = text_left - scroll.x;
+
+        // Overlay scrollbars at the right and bottom edges.
+        let mut scrollbars = Vec::new();
+        if !single_line {
+            let thickness = px(SCROLLBAR_WIDTH);
+            let has_vertical = max_scroll_y > px(0.);
+            let has_horizontal = max_scroll_x > px(0.);
+            if has_vertical {
+                let bottom = if has_horizontal {
+                    bounds.bottom() - thickness
+                } else {
+                    bounds.bottom()
+                };
+                let track = Bounds::from_corners(
+                    point(bounds.right() - thickness, bounds.top()),
+                    point(bounds.right(), bottom),
+                );
+                scrollbars.extend(ScrollbarLayout::new(
+                    Axis::Vertical,
+                    track,
+                    viewport_height,
+                    scroll.y,
+                    max_scroll_y,
+                ));
+            }
+            if has_horizontal {
+                let right = if has_vertical {
+                    bounds.right() - thickness
+                } else {
+                    bounds.right()
+                };
+                let track = Bounds::from_corners(
+                    point(text_left, bounds.bottom() - thickness),
+                    point(right, bounds.bottom()),
+                );
+                scrollbars.extend(ScrollbarLayout::new(
+                    Axis::Horizontal,
+                    track,
+                    viewport_width,
+                    scroll.x,
+                    max_scroll_x,
+                ));
+            }
+        }
+        let scrollbar_hitboxes = scrollbars
+            .iter()
+            .filter(|bar| editor.scrollbars.visible(bar.axis))
+            .map(|bar| window.insert_hitbox(bar.track, HitboxBehavior::Normal))
+            .collect();
 
         // Changes since the last commit, as bars at the gutter's left edge.
         let mut git_markers = Vec::new();
@@ -629,6 +741,7 @@ impl Element for EditorElement {
             text_left,
             line_height,
             lines,
+            scrollbars,
         };
         let partner = self.editor.update(cx, |editor, cx| {
             // Revert buttons are placed in render from the scroll it saw;
@@ -638,6 +751,10 @@ impl Element for EditorElement {
                 cx.notify();
             }
             editor.scroll = scroll;
+            editor.max_scroll_x = max_scroll_x;
+            if widest_cols.is_none() {
+                editor.scrollbars.widest_drawn = content_width;
+            }
             editor.autoscroll = false;
             editor.scroll_partner.clone()
         });
@@ -669,6 +786,7 @@ impl Element for EditorElement {
             fold_markers,
             placeholder,
             cursors,
+            scrollbar_hitboxes,
         }
     }
 
@@ -764,6 +882,7 @@ impl Element for EditorElement {
             },
         );
 
+        self.paint_scrollbars(&layout, &prepaint.scrollbar_hitboxes, window, cx);
         self.editor
             .update(cx, |editor, _| editor.layout = Some(layout));
     }

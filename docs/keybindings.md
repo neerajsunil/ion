@@ -31,6 +31,7 @@ palette**, and as a tooltip on each button.
 | Ctrl+P | Go to file (or click the search box in the title bar). Recent and agent-changed files come first, then the files you use most; words match in any order; `path:line:column` opens at that line |
 | Ctrl+Shift+P or F1 | Command palette: type `>` then a command name |
 | Ctrl+G | Go to line (`line` or `line:column`) |
+| Ctrl+Shift+O | Go to symbol in file (or type `@` in the palette) |
 | Ctrl+, | Settings (type to search every setting) |
 | Ctrl+K Ctrl+S | Keyboard shortcuts |
 | Ctrl+= / Ctrl+- / Ctrl+0 | Zoom in / out / reset (all text sizes) |

@@ -2,6 +2,8 @@
 
 use gpui::{Bounds, Pixels, ShapedLine};
 
+use crate::scrollbar::ScrollbarLayout;
+
 /// Lines longer than this are cut off when drawn, so one huge minified line
 /// can't stall a frame.
 pub(crate) const MAX_DRAWN_CHARS: usize = 10_000;
@@ -97,6 +99,7 @@ pub(crate) struct EditorLayout {
     pub text_left: Pixels,
     pub line_height: Pixels,
     pub lines: Vec<VisibleLine>,
+    pub scrollbars: Vec<ScrollbarLayout>,
 }
 
 impl EditorLayout {

@@ -118,23 +118,42 @@ impl EntityInputHandler for Editor {
             }
             _ => None,
         };
+        // A closing bracket typed on a blank line moves back a level.
+        let outdent = (!self.single_line && !self.input && self.marked_range.is_none())
+            .then(|| self.indent_rules())
+            .flatten()
+            .map(|_| settings::get(cx).indent_unit());
+        let mut chars = text.chars();
+        let typed = match (chars.next(), chars.next()) {
+            (Some(c), None) => Some(c),
+            _ => None,
+        };
+        let type_char = |buffer: &mut text::Buffer| {
+            let Some(c) = typed else {
+                return false;
+            };
+            pair.is_some_and(|c| buffer.type_pair(c, true))
+                || outdent
+                    .as_deref()
+                    .is_some_and(|unit| buffer.type_closer_outdented(c, unit))
+        };
         if range_utf16.is_none() && self.marked_range.is_none() && self.buffer.has_extra_cursors() {
             // Typing at every cursor.
             self.buffer.for_each_selection(|buffer| {
-                if !pair.is_some_and(|c| buffer.type_pair(c, true)) {
+                if !type_char(buffer) {
                     buffer.replace(None, &text);
                 }
             });
         } else {
             let range = self.input_range(range_utf16);
             self.buffer.clear_extra_cursors();
-            let paired = pair.is_some_and(|c| {
+            let paired = typed.is_some() && {
                 self.buffer.set_selection(text::Selection {
                     anchor: range.start,
                     head: range.end,
                 });
-                self.buffer.type_pair(c, true)
-            });
+                type_char(&mut self.buffer)
+            };
             if !paired {
                 self.buffer.replace(Some(range), &text);
             }

@@ -4,6 +4,9 @@
 //! search) runs on background threads and hands results back to the UI.
 
 mod filesystem;
+// Formatting runs from the app, never in the server.
+#[cfg(feature = "remote")]
+pub mod format;
 mod fs;
 mod index;
 #[cfg(feature = "remote")]

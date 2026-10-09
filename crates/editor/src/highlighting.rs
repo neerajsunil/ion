@@ -4,8 +4,8 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use gpui::{AppContext, Context, FontStyle, FontWeight, Hsla, Task, TextRun, font, rgb};
-use syntax::{Highlight, Language, LanguageId, Tree};
+use gpui::{App, AppContext, Context, FontStyle, FontWeight, Hsla, Task, TextRun, font, rgb};
+use syntax::{Highlight, Language, LanguageId, Symbol, Tree};
 use text::TextEdit;
 
 use crate::Editor;
@@ -77,7 +77,7 @@ impl Editor {
 
     /// Whether this editor (or a side of its split diff) holds a syntax tree
     /// or is building one.
-    pub fn holds_syntax_tree(&self, cx: &gpui::App) -> bool {
+    pub fn holds_syntax_tree(&self, cx: &App) -> bool {
         self.syntax.as_ref().is_some_and(|syntax| syntax.shown)
             || self.split.as_ref().is_some_and(|split| {
                 split.left.read(cx).holds_syntax_tree(cx)
@@ -101,6 +101,33 @@ impl Editor {
                 side.update(cx, |side, cx| side.release_syntax_tree(cx));
             }
         }
+    }
+
+    /// The file's definitions, worked out in the background from a snapshot.
+    /// `None` for files without a language.
+    pub fn symbols(&self, cx: &App) -> Option<Task<Vec<Symbol>>> {
+        let syntax = self.syntax.as_ref()?;
+        let id = syntax.id;
+        let language = syntax.language.clone();
+        // The tree may lag the text by an edit; re-parsing from it is quick.
+        let old_tree = syntax.tree.clone().filter(|_| !syntax.tree_stale);
+        let rope = self.buffer.rope().clone();
+        Some(cx.background_spawn(async move {
+            let Some(language) = language.or_else(|| syntax::load(id).ok()) else {
+                return Vec::new();
+            };
+            if !language.has_symbols() {
+                return Vec::new();
+            }
+            syntax::parse(&language, &rope, old_tree.as_ref())
+                .map(|tree| syntax::symbols(&language, &tree, &rope))
+                .unwrap_or_default()
+        }))
+    }
+
+    /// How Enter indents in this file; `None` for plain text and prose.
+    pub(crate) fn indent_rules(&self) -> Option<text::IndentRules> {
+        self.syntax.as_ref()?.id.indent_rules()
     }
 
     pub fn language_name(&self) -> Option<&'static str> {
