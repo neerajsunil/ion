@@ -1,7 +1,7 @@
 name: Release
 
 # Push a tag `v<workspace version>` (e.g. `v0.2.0`) to build Ion for Windows
-# and publish it as a GitHub release.
+# and macOS and publish them as a GitHub release.
 on:
   push:
     tags: ['v*']
@@ -11,29 +11,18 @@ permissions:
   contents: read
 
 jobs:
+  # Linux and macOS servers: the Linux ones are bundled into the app, the
+  # macOS ones are published with the matching server-v* release.
   server-assets:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.99.0
-        with:
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@v2
-      - run: pip install cargo-zigbuild==0.23.4 ziglang==0.16.0
-      - run: |
-          cargo zigbuild -p ion_server --release --target x86_64-unknown-linux-musl
-          cargo zigbuild -p ion_server --release --target aarch64-unknown-linux-musl
-          python scripts/package-server.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: server-dist
-          path: target/server-dist/*
+    uses: ./.github/workflows/server-release.yml
+    permissions:
+      contents: write
 
   windows:
     needs: server-assets
     runs-on: windows-latest
-    permissions:
-      contents: write
+    outputs:
+      version: ${{ steps.package.outputs.version }}
     steps:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
@@ -60,28 +49,52 @@ jobs:
           Copy-Item target/release/ion.exe, README.md, LICENSE-MIT, LICENSE-APACHE "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
           Copy-Item target/release/ion.exe "dist/$name.exe"
-          Push-Location dist
-          Get-FileHash "$name.zip", "$name.exe" -Algorithm SHA256 |
-            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
-            Set-Content -Encoding ascii SHA256SUMS
-          Pop-Location
           "version=$version" >> $env:GITHUB_OUTPUT
-          "name=$name" >> $env:GITHUB_OUTPUT
       - uses: actions/upload-artifact@v4
         with:
           name: ion-windows-x64
           path: |
             dist/*.zip
             dist/*.exe
-            dist/SHA256SUMS
+
+  macos:
+    needs: server-assets
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      # Bundled into the app, so SSH projects work without a download.
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-dist
+          path: target/server-dist
+      - name: Build and bundle
+        run: scripts/bundle-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ion-macos-arm64
+          path: dist/*.zip
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: ion-*
+          merge-multiple: true
       - name: Publish
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.package.outputs.version }}
-          NAME: ${{ steps.package.outputs.name }}
+          VERSION: ${{ needs.windows.outputs.version }}
         run: |
           test "$GITHUB_REF_NAME" = "v$VERSION"
-          gh release create "$GITHUB_REF_NAME" "dist/$NAME.zip" "dist/$NAME.exe" dist/SHA256SUMS \
-            --title "Ion $VERSION" --notes-file docs/release-notes.md --latest
+          cd dist
+          sha256sum *.zip *.exe > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" *.zip *.exe SHA256SUMS \
+            --title "Ion $VERSION" --notes-file ../docs/release-notes.md --latest

@@ -23,7 +23,7 @@ GPU-accelerated UI framework from Zed.
 | `crates/bridge` | `ion_bridge` | Local MCP server (WebSocket, JSON-RPC) for harness IDE integrations such as Claude Code's `/ide` | **no** |
 | `crates/remote` | `ion_remote` | System `ssh` process, server deployment and the multiplexed protocol | **no** |
 | `crates/remote_protocol` | `ion_remote_protocol` | Versioned messages and bounded stdio framing | **no** |
-| `crates/server` | `ion_server` | Static Linux remote server: file operations, search and native watching | **no** |
+| `crates/server` | `ion_server` | Remote server for Linux (static) and macOS: file operations, search and native watching | **no** |
 
 Planned for later phases (see [roadmap.md](roadmap.md)): `review` and
 `bridge`. They are created when their phase starts, not before.
@@ -48,7 +48,8 @@ ion ─▶ workspace ─▶ editor ─────▶ text, project, syntax, git
 
 The server uses `project` without its `remote` feature. Its dependency graph
 contains neither GPUI nor any SSH code: it runs behind the host's SSH daemon.
-The client embeds packaged Linux assets when available and uploads the matching
+The client embeds packaged Linux assets when available (macOS servers are
+downloaded from the matching release when needed) and uploads the matching
 version over the SSH connection. Each remote project has one system `ssh`
 process (jump hosts come from the user's SSH config) whose stdio becomes
 `ion-server --stdio`. File requests, searches, the watcher, Git and terminals
@@ -103,7 +104,7 @@ Rules:
 | Target | CPU baseline | Status |
 |---|---|---|
 | `x86_64-pc-windows-msvc` | `x86-64-v2` | Supported |
-| `aarch64-apple-darwin` | `apple-m1` | Planned |
+| `aarch64-apple-darwin` | `apple-m1` | Supported |
 | `aarch64-pc-windows-msvc` | default | Possible |
 
 `x86-64-v2` (SSE4.2, POPCNT) is required by Windows 11 24H2. `x86-64-v3` (AVX2)

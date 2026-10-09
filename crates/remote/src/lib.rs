@@ -27,6 +27,7 @@ mod mux;
 mod server;
 mod ssh;
 mod terminal;
+mod trace;
 
 pub use askpass::askpass_main;
 pub use auth::{AuthPrompt, PromptField, Prompter};

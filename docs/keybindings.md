@@ -2,6 +2,25 @@
 
 Windows shortcuts are shown; on macOS use ⌘ where Windows uses Ctrl.
 
+## Change any shortcut
+
+Open **Settings → Keyboard Shortcuts** (Ctrl+K Ctrl+S). Search for a
+command, click its shortcut and press the keys you want. Each changed
+shortcut has a button to reset it, and **Reset All** puts everything back.
+You can also remove a shortcut you keep pressing by accident.
+
+Your shortcuts are saved in `settings.json` under `keybindings`, so you can
+edit them there too. An empty value turns a shortcut off, and two-step
+shortcuts are written with a space:
+
+```json
+"keybindings": {
+  "workspace::ToggleTerminal": "ctrl-j",
+  "workspace::CloseAllTabs": "ctrl-k ctrl-w",
+  "editor::DuplicateLine": ""
+}
+```
+
 ## Finding things
 
 Everything Ion can do is in the **Ion menu** (top left), in the **command
@@ -9,10 +28,11 @@ palette**, and as a tooltip on each button.
 
 | Shortcut | Action |
 |---|---|
-| Ctrl+P | Go to file (or click the search box in the title bar) |
+| Ctrl+P | Go to file (or click the search box in the title bar). Recent and agent-changed files come first; `path:line:column` opens at that line |
 | Ctrl+Shift+P or F1 | Command palette: type `>` then a command name |
 | Ctrl+G | Go to line (`line` or `line:column`) |
-| Ctrl+, | Settings |
+| Ctrl+, | Settings (type to search every setting) |
+| Ctrl+K Ctrl+S | Keyboard shortcuts |
 | Ctrl+= / Ctrl+- / Ctrl+0 | Zoom in / out / reset (all text sizes) |
 | Ctrl+Q | Quit (asks once about unsaved changes in every window) |
 
@@ -27,8 +47,10 @@ In dialogs and forms, **Tab** and **Shift+Tab** move between fields.
 | Ctrl+S | Save (asks for a name if untitled) |
 | Ctrl+Shift+S | Save as |
 | Ctrl+W | Close tab |
+| Ctrl+K Ctrl+W | Close all tabs in the pane |
 | Ctrl+Shift+T | Reopen the last closed file |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
+| Ctrl+PageDown / Ctrl+PageUp | Next / previous tab (on a Mac, also ⌘⌥→ / ⌘⌥←) |
 | Ctrl+B | Toggle sidebar (or drag its edge to resize; double-click the edge to reset) |
 | Ctrl+Shift+E | Show files in sidebar |
 | Ctrl+Shift+F | Search in project |
@@ -62,8 +84,12 @@ items selected the menu acts on all of them.
 
 The editor area and the terminal dock below it can each be split into panes.
 Any tab (file, diff or terminal) can be dragged to another pane's tab bar, or
-onto a pane's edge to split it. Drag a divider to resize; double-click it to
-make the panes equal. The layout is restored on the next start.
+onto a pane's edge to split it. While you drag, the part of the pane the tab
+will take is shaded. Drag a divider to resize; double-click it to make the
+panes equal. The layout is restored on the next start.
+
+The sidebar can sit on the left or the right (**Settings → General**). On a
+Mac, double-click the title bar to zoom the window.
 
 | Shortcut | Action |
 |---|---|
@@ -84,7 +110,7 @@ works too).
 |---|---|
 | Ctrl+Shift+G | Show the Git view |
 | Ctrl+Shift+A | Show the Agents view |
-| Ctrl+Shift+M | Show Problems (errors and warnings from terminal output) |
+| Ctrl+Shift+M | Toggle the Problems tab in the bottom panel (errors and warnings from terminal output) |
 | Ctrl+Alt+K | Send the selection (or `file:line`) to the agent |
 | Ctrl+Enter or Enter | Commit (in the message box) |
 
@@ -145,12 +171,16 @@ typing a bracket or quote with text selected wraps the selection.
 
 | Shortcut | Action |
 |---|---|
-| Ctrl+\` | Show or hide the terminal dock (shells keep running while hidden) |
+| Ctrl+\` or Ctrl+J | Show or hide the terminal dock (shells keep running while hidden) |
 | Ctrl+Shift+\` | New terminal tab |
 | Ctrl+C | Copy if text is selected, otherwise interrupt |
 | Ctrl+V / Ctrl+Shift+V | Paste |
 | Right click | Copy selection, or paste |
+| Select text | Copies it, if **Copy on select** is on in Settings |
 | Ctrl+click | Open a file named in the output (`src/main.rs:12:5`, `Program.cs(10,4)`) or a web address (`localhost:3000`) |
+
+The **+** menu lists your agents and shells. Hide the ones you don't use in
+**Settings → Terminal**, where you also pick the default shell.
 
 While the terminal is focused, Ctrl+W, Ctrl+B, Ctrl+O, Ctrl+F, Ctrl+H and
 Ctrl+N go to the shell (readline and agent shortcuts), not to Ion.

@@ -19,6 +19,7 @@ gpui.workspace = true
 polling.workspace = true
 regex.workspace = true
 theme.workspace = true
+settings.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

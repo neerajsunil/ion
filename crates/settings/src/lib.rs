@@ -3,6 +3,7 @@
 //! The settings page writes through [`update`]; editing the file by hand
 //! works too, since the file is watched and reloaded.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -43,6 +44,53 @@ pub enum WordWrap {
     Prose,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineNumbers {
+    #[default]
+    On,
+    /// Distance from the cursor line, handy for jumping by count.
+    Relative,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorStyle {
+    #[default]
+    Bar,
+    Block,
+    Underline,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineSpacing {
+    Compact,
+    #[default]
+    Normal,
+    Relaxed,
+}
+
+impl LineSpacing {
+    /// Line height as a multiple of the font size.
+    pub fn factor(self) -> f32 {
+        match self {
+            Self::Compact => 1.3,
+            Self::Normal => 1.5,
+            Self::Relaxed => 1.75,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    #[default]
+    Left,
+    Right,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -51,6 +99,22 @@ pub struct Settings {
     /// Editor and terminal font; empty uses the platform default.
     pub editor_font_family: String,
     pub editor_font_size: u32,
+    /// Space between editor lines.
+    pub line_spacing: LineSpacing,
+    /// Which side of the window the sidebar is on.
+    pub sidebar_side: Side,
+    pub line_numbers: LineNumbers,
+    /// A band behind the cursor line.
+    pub highlight_current_line: bool,
+    pub cursor_style: CursorStyle,
+    /// Tab inserts spaces; off inserts a tab character.
+    pub indent_with_spaces: bool,
+    /// Typing a bracket or quote adds its closing partner.
+    pub auto_close_brackets: bool,
+    /// Remove spaces at line ends when saving (not on the line you're on).
+    pub trim_trailing_whitespace: bool,
+    /// End files with a line break when saving.
+    pub insert_final_newline: bool,
     /// Spaces per indent (Tab inserts this many) and the width of tab characters.
     pub tab_size: u32,
     pub auto_save: AutoSave,
@@ -60,6 +124,12 @@ pub struct Settings {
     /// program. Empty picks PowerShell 7, then Windows PowerShell.
     pub terminal_shell: String,
     pub terminal_font_size: u32,
+    /// Selecting text in a terminal copies it.
+    pub terminal_copy_on_select: bool,
+    /// Shells and agents left out of the new-terminal menus, by name.
+    pub hidden_terminals: Vec<String>,
+    /// Reopen the last project and tabs when Ion starts.
+    pub restore_session: bool,
     /// Who last changed the cursor line, in the status bar.
     pub git_blame: bool,
     /// Added and changed lines marked in the editor gutter.
@@ -67,6 +137,9 @@ pub struct Settings {
     /// A desktop notification when a terminal asks for attention (an agent
     /// finished or needs input) while Ion is in the background.
     pub desktop_notifications: bool,
+    /// Shortcut changes: action name (`workspace::SplitRight`) to keys
+    /// (`ctrl-k right`), or "" to remove the shortcut.
+    pub keybindings: BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -76,14 +149,27 @@ impl Default for Settings {
             ui_font_size: 13,
             editor_font_family: String::new(),
             editor_font_size: 14,
+            line_spacing: LineSpacing::Normal,
+            sidebar_side: Side::Left,
+            line_numbers: LineNumbers::On,
+            highlight_current_line: true,
+            cursor_style: CursorStyle::Bar,
+            indent_with_spaces: true,
+            auto_close_brackets: true,
+            trim_trailing_whitespace: false,
+            insert_final_newline: false,
             tab_size: 4,
             auto_save: AutoSave::Off,
             word_wrap: WordWrap::Prose,
             terminal_shell: String::new(),
             terminal_font_size: 14,
+            terminal_copy_on_select: false,
+            hidden_terminals: Vec::new(),
+            restore_session: true,
             git_blame: true,
             git_gutter: true,
             desktop_notifications: true,
+            keybindings: BTreeMap::new(),
         }
     }
 }
@@ -94,6 +180,23 @@ impl Settings {
     /// Tab size kept within a sensible range.
     pub fn tab_size(&self) -> usize {
         self.tab_size.clamp(1, 16) as usize
+    }
+
+    /// What Tab inserts, and Shift+Tab removes.
+    pub fn indent_unit(&self) -> String {
+        if self.indent_with_spaces {
+            " ".repeat(self.tab_size())
+        } else {
+            "\t".to_owned()
+        }
+    }
+
+    /// Whether a shell or agent shows in the new-terminal menus.
+    pub fn shows_terminal(&self, name: &str) -> bool {
+        !self
+            .hidden_terminals
+            .iter()
+            .any(|hidden| hidden.eq_ignore_ascii_case(name))
     }
 
     /// Pushes colors and fonts into the theme.
@@ -115,6 +218,7 @@ impl Settings {
             self.terminal_font_size,
         );
         theme::set_mono_font(Some(self.editor_font_family.clone()));
+        theme::set_line_spacing(self.line_spacing.factor());
     }
 }
 

@@ -109,8 +109,12 @@ pub fn shortcut(action: &dyn Action, cx: &App) -> Option<SharedString> {
     let keymap = cx.key_bindings();
     let keymap = keymap.borrow();
     let binding = keymap.bindings_for_action(action).next()?;
-    let strokes: Vec<String> = binding
-        .keystrokes()
+    Some(keystrokes_text(binding.keystrokes()))
+}
+
+/// "Ctrl+K Ctrl+S" for a binding's keystrokes.
+pub fn keystrokes_text(keystrokes: &[gpui::KeybindingKeystroke]) -> SharedString {
+    let strokes: Vec<String> = keystrokes
         .iter()
         .map(|stroke| {
             let modifiers = stroke.modifiers();
@@ -135,7 +139,7 @@ pub fn shortcut(action: &dyn Action, cx: &App) -> Option<SharedString> {
             text
         })
         .collect();
-    Some(strokes.join(" ").into())
+    strokes.join(" ").into()
 }
 
 fn key_name(key: &str) -> String {

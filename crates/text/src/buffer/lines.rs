@@ -262,9 +262,95 @@ impl Buffer {
     }
 }
 
+impl Buffer {
+    /// Before a save: strips trailing spaces and tabs (except on lines with
+    /// a cursor, so typing isn't disturbed) and ends the text with a line
+    /// break. One undo step; cursors keep their places. Returns whether the
+    /// text changed.
+    pub fn tidy_for_save(&mut self, trim_whitespace: bool, final_newline: bool) -> bool {
+        // Rows with a cursor or selection on them, sorted by start.
+        let busy: Vec<(usize, usize)> = self
+            .selections()
+            .iter()
+            .map(|selection| {
+                let range = selection.range();
+                (self.row_col(range.start).0, self.row_col(range.end).0)
+            })
+            .collect();
+        let mut edits: Vec<(std::ops::Range<usize>, &str)> = Vec::new();
+        if trim_whitespace {
+            let mut busy = busy.iter().peekable();
+            for row in 0..self.line_count() {
+                while busy.next_if(|(_, last)| *last < row).is_some() {}
+                if busy.peek().is_some_and(|(first, _)| *first <= row) {
+                    continue;
+                }
+                let len = self.line_len(row);
+                let line = self.rope.line(row);
+                let trailing = line
+                    .chars_at(len)
+                    .reversed()
+                    .take_while(|c| matches!(c, ' ' | '\t'))
+                    .count();
+                if trailing > 0 {
+                    let start = self.line_start(row);
+                    edits.push((start + len - trailing..start + len, ""));
+                }
+            }
+        }
+        let len = self.len();
+        if final_newline && len > 0 && self.rope.char(len - 1) != '\n' {
+            edits.push((len..len, self.line_ending));
+        }
+        if edits.is_empty() {
+            return false;
+        }
+        // Rows don't change, nor do columns on cursor lines.
+        let place = |buffer: &Self, selection: Selection| {
+            let (anchor, head) = (
+                buffer.row_col(selection.anchor),
+                buffer.row_col(selection.head),
+            );
+            (anchor, head)
+        };
+        let primary = place(self, self.selection);
+        let extra: Vec<_> = self.extra.iter().map(|s| place(self, *s)).collect();
+        self.batch = Some((self.selection, self.extra.clone(), false));
+        for (range, text) in edits.into_iter().rev() {
+            self.edit(range, text, EditKind::Other);
+        }
+        self.batch = None;
+        let restore = |buffer: &Self, (anchor, head): ((usize, usize), (usize, usize))| Selection {
+            anchor: buffer.offset(anchor.0, anchor.1),
+            head: buffer.offset(head.0, head.1),
+        };
+        self.selection = restore(self, primary);
+        self.extra = extra.into_iter().map(|s| restore(self, s)).collect();
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tidy_for_save_trims_other_lines_and_adds_a_final_newline() {
+        let mut buffer = Buffer::new("a  \nb\t\nc  ");
+        // The cursor sits at the end of "b\t".
+        buffer.place_cursor(6, false);
+        assert!(buffer.tidy_for_save(true, true));
+        assert_eq!(buffer.text(), "a\nb\t\nc\n");
+        assert_eq!(buffer.row_col(buffer.cursor()), (1, 2));
+        assert!(!buffer.tidy_for_save(true, true));
+        // One undo step brings it all back.
+        assert!(buffer.undo());
+        assert_eq!(buffer.text(), "a  \nb\t\nc  ");
+        let mut crlf = Buffer::new("x\r\ny");
+        crlf.place_cursor(0, false);
+        assert!(crlf.tidy_for_save(false, true));
+        assert_eq!(crlf.text(), "x\r\ny\r\n");
+    }
 
     fn buffer(text: &str, anchor: (usize, usize), head: (usize, usize)) -> Buffer {
         let mut b = Buffer::new(text);

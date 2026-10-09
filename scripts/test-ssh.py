@@ -104,7 +104,7 @@ with tempfile.TemporaryDirectory(prefix="ion-ssh-fixture-") as temp:
         )
     else:
         launcher = f'#!/bin/sh\nexec "{server_binary}" "$@"\n'
-    artifact = f"ion-server-{hello['version']}-{target}"
+    artifact = f"ion-server-{hello['version']}-linux-x64"
     (dist / artifact).write_bytes(launcher.encode())
     (dist / "manifest.json").write_text(json.dumps({
         "version": hello["version"],
@@ -116,9 +116,11 @@ with tempfile.TemporaryDirectory(prefix="ion-ssh-fixture-") as temp:
     host_key = paramiko.RSAKey.generate(2048)
     key_path = temp / "identity"
     key_path.write_bytes(Ed25519PrivateKey.generate().private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption()))
+    # OpenSSH refuses keys readable by anyone but their owner.
     if WINDOWS:
-        # OpenSSH refuses keys readable by anyone but their owner.
         subprocess.run(["icacls", str(key_path), "/inheritance:r", "/grant:r", f"{os.environ['USERNAME']}:R"], check=True, capture_output=True)
+    else:
+        key_path.chmod(0o600)
     identity = paramiko.Ed25519Key.from_private_key_file(str(key_path))
     null_device = "NUL" if WINDOWS else "/dev/null"
     (ssh_dir / "config").write_text(

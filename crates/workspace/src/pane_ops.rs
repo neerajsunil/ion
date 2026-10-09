@@ -319,17 +319,36 @@ impl Workspace {
 
     /// Shows the Settings tab, opening it next to the current file.
     pub(crate) fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let existing = self
-            .items()
-            .find(|(_, item)| matches!(item.kind, ItemKind::Settings(_)))
-            .map(|(pane, item)| (pane, item.id()));
-        if let Some((pane, id)) = existing
+        self.show_settings_page(None, window, cx);
+    }
+
+    /// Opens Settings, or brings it forward, optionally at `page`.
+    pub(crate) fn show_settings_page(
+        &mut self,
+        page: Option<crate::settings_view::Page>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let existing = self.items().find_map(|(pane, item)| match &item.kind {
+            ItemKind::Settings(view) => Some((pane, item.id(), view.clone())),
+            _ => None,
+        });
+        if let Some((pane, id, view)) = existing
             && let Some(ix) = self.panes[&pane].position(id)
         {
+            if let Some(page) = page {
+                view.update(cx, |view, cx| view.show_page(page, cx));
+            }
             self.activate_item(pane, ix, window, cx);
             return;
         }
-        let view = cx.new(crate::settings_view::SettingsView::new);
+        let view = cx.new(|cx| {
+            let mut view = crate::settings_view::SettingsView::new(cx);
+            if let Some(page) = page {
+                view.show_page(page, cx);
+            }
+            view
+        });
         let item = Item {
             kind: ItemKind::Settings(view),
             _subscriptions: Vec::new(),
@@ -423,6 +442,9 @@ impl Workspace {
             self.shown_editor = Some(editor.entity_id());
             if changed {
                 let path = editor.read(cx).path().map(Path::to_path_buf);
+                if let Some(path) = &path {
+                    self.note_recent_file(path.clone());
+                }
                 if let Some(tree) = &self.file_tree {
                     tree.update(cx, |tree, cx| tree.set_active(path, cx));
                 }

@@ -19,7 +19,7 @@ use crate::diff_view::DiffTarget;
 use crate::find_bar::{FindBar, FindBarEvent};
 use crate::git_panel::{GitPanel, GitPanelEvent};
 use crate::git_state::GitState;
-use crate::palette::{Palette, PaletteEvent};
+use crate::palette::{Palette, PaletteEvent, RecentFile};
 use crate::pane::{Axis, Pane, PaneId, PaneNode, Region, Side};
 use crate::pane_view::{LayoutBounds, Resize};
 use crate::project_search::{ProjectSearch, ProjectSearchEvent};
@@ -36,6 +36,7 @@ actions!(
         NewFile,
         SaveAs,
         CloseTab,
+        CloseAllTabs,
         NextTab,
         PreviousTab,
         ToggleSidebar,
@@ -64,6 +65,7 @@ actions!(
         SwitchBranch,
         OpenSettings,
         OpenSettingsFile,
+        OpenKeyboardShortcuts,
         UseDarkTheme,
         UseLightTheme,
         UseSystemTheme,
@@ -86,6 +88,8 @@ actions!(
 pub struct NewAgent(pub terminal::HarnessKind);
 
 const CONTEXT: Option<&str> = Some("Workspace");
+/// Recently used files remembered for Go to File.
+const MAX_RECENT_FILES: usize = 50;
 pub(crate) const SIDEBAR_WIDTH: f32 = 260.;
 const SIDEBAR_MIN_WIDTH: f32 = 180.;
 const SIDEBAR_MAX_WIDTH: f32 = 600.;
@@ -103,6 +107,11 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-w", CloseTab, CONTEXT),
         KeyBinding::new("ctrl-tab", NextTab, CONTEXT),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, CONTEXT),
+        KeyBinding::new("ctrl-pagedown", NextTab, CONTEXT),
+        KeyBinding::new("ctrl-pageup", PreviousTab, CONTEXT),
+        KeyBinding::new("secondary-k secondary-w", CloseAllTabs, CONTEXT),
+        KeyBinding::new("secondary-k secondary-s", OpenKeyboardShortcuts, CONTEXT),
+        KeyBinding::new("secondary-j", ToggleTerminal, CONTEXT),
         KeyBinding::new("secondary-b", ToggleSidebar, CONTEXT),
         KeyBinding::new("secondary-shift-e", ShowFiles, CONTEXT),
         KeyBinding::new("ctrl-`", ToggleTerminal, CONTEXT),
@@ -139,6 +148,13 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary--", ZoomOut, CONTEXT),
         KeyBinding::new("secondary-0", ResetZoom, CONTEXT),
     ];
+    if cfg!(target_os = "macos") {
+        // Cmd+Shift+[ and ] fold code, so tabs use VS Code's other Mac keys.
+        bindings.extend([
+            KeyBinding::new("cmd-alt-right", NextTab, CONTEXT),
+            KeyBinding::new("cmd-alt-left", PreviousTab, CONTEXT),
+        ]);
+    }
     bindings.push(if cfg!(target_os = "macos") {
         KeyBinding::new("cmd-alt-f", FindReplace, CONTEXT)
     } else {
@@ -153,7 +169,6 @@ pub(crate) enum SidebarMode {
     Search,
     Git,
     Agents,
-    Problems,
 }
 
 /// What a text prompt is for.
@@ -231,6 +246,9 @@ pub struct Workspace {
     pub(crate) zoomed: Option<PaneId>,
     pub(crate) layout_bounds: Rc<RefCell<LayoutBounds>>,
     pub(crate) resize: Option<Resize>,
+    /// Where a dragged tab would land: a pane, and the side it would split
+    /// off (`None` moves it into the pane).
+    pub(crate) drop_target: Option<(PaneId, Option<Side>)>,
     /// The open popup menu.
     pub(crate) menu: Option<ui::Menu>,
     pub(crate) menu_kind: Option<MenuKind>,
@@ -241,6 +259,9 @@ pub struct Workspace {
     pub(crate) following: Option<crate::agents::Following>,
     /// Files each agent terminal changed, oldest first.
     pub(crate) touched: HashMap<EntityId, Vec<PathBuf>>,
+    /// Files shown in an editor or changed by an agent, most recent first,
+    /// for Go to File.
+    pub(crate) recent_files: Vec<PathBuf>,
     /// Problems read from each terminal's output.
     pub(crate) problems: HashMap<EntityId, crate::problems::TerminalProblems>,
     pub(crate) problem_scans: HashMap<EntityId, Task<()>>,
@@ -379,6 +400,7 @@ impl Workspace {
             zoomed: None,
             layout_bounds: Rc::default(),
             resize: None,
+            drop_target: None,
             menu: None,
             menu_kind: None,
             sidebar_visible: true,
@@ -386,6 +408,7 @@ impl Workspace {
             sidebar_mode: SidebarMode::Files,
             following: None,
             touched: HashMap::new(),
+            recent_files: Vec::new(),
             problems: HashMap::new(),
             problem_scans: HashMap::new(),
             task_terminals: HashMap::new(),
@@ -473,6 +496,7 @@ impl Workspace {
         self.sidebar_visible = true;
         self.sidebar_mode = SidebarMode::Files;
         self.file_index = None;
+        self.recent_files.clear();
         self.project_search.update(cx, |search, cx| {
             search.set_filesystem(self.filesystem.clone());
             search.set_index(None, cx);
@@ -787,6 +811,20 @@ impl Workspace {
         }
     }
 
+    fn close_all_tabs(&mut self, _: &CloseAllTabs, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.active_pane;
+        let items: Vec<EntityId> = self
+            .panes
+            .get(&pane)
+            .map(|pane| pane.items.iter().map(|item| item.id()).collect())
+            .unwrap_or_default();
+        for item in items {
+            if let Some((pane, ix)) = self.find_item(item) {
+                self.close_item(pane, ix, window, cx);
+            }
+        }
+    }
+
     fn cycle_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self.active_pane;
         let Some(target) = self.panes.get(&pane) else {
@@ -836,8 +874,13 @@ impl Workspace {
         cx.notify();
     }
 
-    fn show_problems_action(&mut self, _: &ShowProblems, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_problems(cx);
+    fn show_problems_action(
+        &mut self,
+        _: &ShowProblems,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_problems(window, cx);
     }
 
     fn run_task_action(&mut self, _: &RunTask, window: &mut Window, cx: &mut Context<Self>) {
@@ -881,6 +924,35 @@ impl Workspace {
         self.toggle_palette(">", window, cx);
     }
 
+    /// Moves `path` to the front of the recently used files.
+    pub(crate) fn note_recent_file(&mut self, path: PathBuf) {
+        self.recent_files.retain(|known| *known != path);
+        self.recent_files.insert(0, path);
+        self.recent_files.truncate(MAX_RECENT_FILES);
+    }
+
+    /// Recent files for Go to File, labeled, without the one being shown
+    /// (switching to it would do nothing).
+    fn palette_recent_files(&self, cx: &gpui::App) -> Vec<RecentFile> {
+        let shown = self
+            .active_editor()
+            .and_then(|editor| editor.read(cx).path().map(Path::to_path_buf));
+        self.recent_files
+            .iter()
+            .filter(|path| Some(*path) != shown.as_ref())
+            .map(|path| RecentFile {
+                path: path.clone(),
+                label: if self.touched.values().any(|files| files.contains(path)) {
+                    Some("changed by agent")
+                } else if self.find_file(path, cx).is_some() {
+                    Some("open")
+                } else {
+                    None
+                },
+            })
+            .collect()
+    }
+
     /// Opens the palette for files ("") or commands (">"), or closes it.
     fn toggle_palette(&mut self, prefix: &str, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.modal, Some(Modal::Palette(_))) {
@@ -889,13 +961,15 @@ impl Workspace {
         }
         let index = self.file_index.clone();
         let remote = self.filesystem.remote().is_some();
-        let palette = cx.new(|cx| Palette::new(index, prefix, remote, window, cx));
+        let recent = self.palette_recent_files(cx);
+        let palette = cx.new(|cx| Palette::new(index, recent, prefix, remote, window, cx));
         let subscription =
             cx.subscribe_in(&palette, window, |this, _, event, window, cx| match event {
-                PaletteEvent::OpenFile(path) => {
+                PaletteEvent::OpenFile(path, position) => {
                     let path = path.clone();
+                    let selection = position.map(|point| (point, point));
                     this.dismiss_modal(window, cx);
-                    this.open_file(path, window, cx);
+                    this.open_file_at(path, selection, window, cx);
                 }
                 PaletteEvent::Run(action) => {
                     let action = action.boxed_clone();
@@ -925,6 +999,24 @@ impl Workspace {
 
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.show_settings(window, cx);
+    }
+
+    fn open_keyboard_shortcuts(
+        &mut self,
+        _: &OpenKeyboardShortcuts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_settings_page(Some(crate::settings_view::Page::Shortcuts), window, cx);
+    }
+
+    fn open_settings_at(
+        &mut self,
+        action: &crate::settings_view::OpenSettingsAt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_settings_page(Some(action.0), window, cx);
     }
 
     fn open_settings_file(
@@ -1038,7 +1130,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Shows the terminal dock and focuses it, or hides it if it's focused.
+    /// Shows the terminal dock and focuses it, or hides it if it's showing.
     pub(crate) fn toggle_terminal(
         &mut self,
         _: &ToggleTerminal,
@@ -1050,13 +1142,15 @@ impl Workspace {
             .panes()
             .iter()
             .all(|pane| self.panes.get(pane).is_none_or(|p| p.items.is_empty()));
-        if self.dock_visible && self.dock.contains(self.active_pane) {
+        if self.dock_visible {
             self.dock_visible = false;
             if self.zoomed.is_some_and(|pane| self.dock.contains(pane)) {
                 self.zoomed = None;
             }
-            self.active_pane = self.file_pane();
-            self.focus_active(window, cx);
+            if self.dock.contains(self.active_pane) {
+                self.active_pane = self.file_pane();
+                self.focus_active(window, cx);
+            }
         } else if dock_empty {
             let pane = self.dock.first_pane();
             self.new_terminal_in(pane, window, cx);
@@ -1158,10 +1252,11 @@ impl Workspace {
         };
         match resize {
             Resize::Sidebar => {
-                self.sidebar_width = event
-                    .position
-                    .x
-                    .clamp(px(SIDEBAR_MIN_WIDTH), px(SIDEBAR_MAX_WIDTH));
+                let width = match settings::get(cx).sidebar_side {
+                    settings::Side::Left => event.position.x,
+                    settings::Side::Right => window.viewport_size().width - event.position.x,
+                };
+                self.sidebar_width = width.clamp(px(SIDEBAR_MIN_WIDTH), px(SIDEBAR_MAX_WIDTH));
                 cx.notify();
             }
             Resize::Dock => {
@@ -1189,6 +1284,9 @@ impl Workspace {
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.drop_target.take().is_some() {
+            cx.notify();
+        }
         if self.resize.take().is_some() {
             self.layout_changed(cx);
         }
@@ -1300,17 +1398,19 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sidebar_right = settings::get(cx).sidebar_side == settings::Side::Right;
         let sidebar = self
             .file_tree
             .clone()
             .filter(|_| self.sidebar_visible)
             .map(|tree| {
-                // Drag the right edge to resize; double-click to reset.
+                // Drag the inner edge to resize; double-click to reset.
                 let handle = div()
                     .id("sidebar-resize")
                     .absolute()
                     .top_0()
-                    .right_0()
+                    .when(sidebar_right, |handle| handle.left_0())
+                    .when(!sidebar_right, |handle| handle.right_0())
                     .w(px(RESIZE_HANDLE))
                     .h_full()
                     .cursor(CursorStyle::ResizeLeftRight)
@@ -1378,6 +1478,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::save_as))
             .on_action(cx.listener(Self::save_untitled))
             .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(Self::close_all_tabs))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::toggle_sidebar))
@@ -1416,6 +1517,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::command_palette))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_settings_file))
+            .on_action(cx.listener(Self::open_keyboard_shortcuts))
+            .on_action(cx.listener(Self::open_settings_at))
             .on_action(
                 cx.listener(|this, _: &SwitchBranch, window, cx| {
                     this.show_branch_picker(window, cx)
@@ -1467,14 +1570,13 @@ impl Render for Workspace {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .when_some(resize_cursor, |root, cursor| root.cursor(cursor))
             .child(title_bar)
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .children(sidebar)
-                    .child(main),
-            )
+            .child(div().flex_1().min_h_0().flex().map(|row| {
+                if sidebar_right {
+                    row.child(main).children(sidebar)
+                } else {
+                    row.children(sidebar).child(main)
+                }
+            }))
             .child(self.render_status_bar(cx))
             .children(modal)
             .children(menu)

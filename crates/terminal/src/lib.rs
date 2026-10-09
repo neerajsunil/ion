@@ -3,6 +3,7 @@
 
 mod colors;
 mod element;
+mod glyphs;
 mod harness;
 mod keys;
 mod links;

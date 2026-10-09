@@ -29,7 +29,15 @@ fn main() {
             );
         }
         let artifacts = value["artifacts"].as_array().expect("Missing artifacts");
-        for artifact in artifacts.iter().filter(|_| current) {
+        // Linux servers are bundled; macOS ones (a rarer host) are downloaded
+        // from the matching release when first needed, keeping the app ~4 MB smaller.
+        let bundled = |artifact: &&serde_json::Value| {
+            current
+                && artifact["target"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("-linux-"))
+        };
+        for artifact in artifacts.iter().filter(bundled) {
             let file = dir
                 .join(artifact["file"].as_str().unwrap())
                 .canonicalize()

@@ -2862,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "ion"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "embed-resource",
  "gpui",
@@ -2878,7 +2878,7 @@ dependencies = [
 
 [[package]]
 name = "ion_bridge"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -2889,7 +2889,7 @@ dependencies = [
 
 [[package]]
 name = "ion_editor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gpui",
  "ion_git",
@@ -2904,7 +2904,7 @@ dependencies = [
 
 [[package]]
 name = "ion_file_tree"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gpui",
  "ion_project",
@@ -2913,11 +2913,11 @@ dependencies = [
 
 [[package]]
 name = "ion_fuzzy"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "ion_git"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "imara-diff",
  "ion_remote",
@@ -2925,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "ion_project"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures",
  "ignore",
@@ -2940,7 +2940,7 @@ dependencies = [
 
 [[package]]
 name = "ion_remote"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -2953,15 +2953,16 @@ dependencies = [
 
 [[package]]
 name = "ion_remote_protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "lz4_flex",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "ion_server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ignore",
  "ion_project",
@@ -2975,7 +2976,7 @@ dependencies = [
 
 [[package]]
 name = "ion_settings"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures",
  "gpui",
@@ -2987,7 +2988,7 @@ dependencies = [
 
 [[package]]
 name = "ion_syntax"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ion_text",
  "ropey",
@@ -3017,13 +3018,14 @@ dependencies = [
 
 [[package]]
 name = "ion_terminal"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
  "futures",
  "gpui",
  "ion_remote",
+ "ion_settings",
  "ion_theme",
  "polling",
  "regex",
@@ -3032,21 +3034,21 @@ dependencies = [
 
 [[package]]
 name = "ion_text"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ropey",
 ]
 
 [[package]]
 name = "ion_theme"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gpui",
 ]
 
 [[package]]
 name = "ion_ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gpui",
  "ion_theme",
@@ -3054,7 +3056,7 @@ dependencies = [
 
 [[package]]
 name = "ion_workspace"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -3371,6 +3373,12 @@ dependencies = [
  "lyon_path",
  "num-traits",
 ]
+
+[[package]]
+name = "lz4_flex"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
 
 [[package]]
 name = "mac"

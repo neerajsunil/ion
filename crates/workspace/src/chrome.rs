@@ -16,6 +16,9 @@ use crate::workspace::*;
 
 pub(crate) const TITLE_HEIGHT: f32 = 38.;
 pub(crate) const STATUS_HEIGHT: f32 = 26.;
+/// Where macOS's window buttons start, and the room they take in the title bar.
+pub(crate) const TRAFFIC_LIGHTS_X: f32 = 14.;
+const TRAFFIC_LIGHTS_WIDTH: f32 = 80.;
 
 impl Workspace {
     // ---- title bar -----------------------------------------------------------
@@ -45,9 +48,23 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_1()
-            .pl_2()
+            .map(|area| {
+                if cfg!(target_os = "macos") {
+                    area.pl(px(TRAFFIC_LIGHTS_WIDTH))
+                } else {
+                    area.pl_2()
+                }
+            })
             .pr_1()
             .window_control_area(WindowControlArea::Drag)
+            // Windows handles this itself in the caption area.
+            .when(cfg!(target_os = "macos"), |area| {
+                area.on_click(|event, window, _| {
+                    if event.click_count() == 2 {
+                        window.titlebar_double_click();
+                    }
+                })
+            })
             .child(
                 div()
                     .id("app-menu")
@@ -394,7 +411,6 @@ impl Workspace {
                 );
             }
             SidebarMode::Search => {}
-            SidebarMode::Problems => actions.extend(self.problem_actions(cx)),
             SidebarMode::Agents => {
                 actions.push(
                     ui::icon_button("agents-new", IconName::Plus)
@@ -412,7 +428,6 @@ impl Workspace {
             SidebarMode::Search => "Search",
             SidebarMode::Git => "Source Control",
             SidebarMode::Agents => "Agents",
-            SidebarMode::Problems => "Problems",
         };
         div()
             .w(self.sidebar_width)
@@ -421,7 +436,10 @@ impl Workspace {
             .flex()
             .flex_col()
             .bg(theme::panel_bg())
-            .border_r_1()
+            .map(|sidebar| match settings::get(cx).sidebar_side {
+                settings::Side::Left => sidebar.border_r_1(),
+                settings::Side::Right => sidebar.border_l_1(),
+            })
             .border_color(theme::border())
             .child(
                 div()
@@ -453,13 +471,6 @@ impl Workspace {
                         SidebarMode::Agents,
                         Box::new(ShowAgents),
                     ))
-                    .child(mode_button(
-                        "sidebar-problems",
-                        IconName::TriangleAlert,
-                        "Problems",
-                        SidebarMode::Problems,
-                        Box::new(ShowProblems),
-                    ))
                     .child(div().flex_1())
                     .children(actions),
             )
@@ -481,7 +492,6 @@ impl Workspace {
                         SidebarMode::Search => body.child(self.project_search.clone()),
                         SidebarMode::Git => body.child(self.git_panel.clone()),
                         SidebarMode::Agents => body.child(self.render_agents(cx)),
-                        SidebarMode::Problems => body.child(self.render_problems(cx)),
                     }),
             )
     }

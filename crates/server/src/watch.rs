@@ -29,6 +29,12 @@ fn eligible(path: &Path) -> bool {
         && !value.contains("/.git/logs")
         && !value.contains("/.ion-save-")
 }
+/// inotify watches one directory at a time, so on Linux each eligible
+/// directory is registered on its own and `node_modules`, `target` and the like
+/// cost nothing. FSEvents (macOS) is one stream for the whole tree, and
+/// re-registering it per directory would restart it thousands of times.
+const PER_DIRECTORY: bool = cfg!(target_os = "linux");
+
 fn add_tree(
     watcher: &mut notify::RecommendedWatcher,
     root: &Path,
@@ -67,7 +73,14 @@ pub fn run(
     })
     .map_err(io::Error::other)?;
     let mut watched = HashSet::new();
-    if let Err(error) = add_tree(&mut watcher, &root, &mut watched) {
+    let added = if PER_DIRECTORY {
+        add_tree(&mut watcher, &root, &mut watched)
+    } else {
+        watcher
+            .watch(&root, RecursiveMode::Recursive)
+            .map_err(io::Error::other)
+    };
+    if let Err(error) = added {
         emit(WatchEvent {
             ready: false,
             paths: vec![],
@@ -118,7 +131,7 @@ pub fn run(
         );
         let mut paths = Vec::new();
         for path in event.paths.into_iter().filter(|path| eligible(path)) {
-            if structural && path.is_dir() {
+            if PER_DIRECTORY && structural && path.is_dir() {
                 // Directory renames require replacing registrations keyed by the
                 // old pathname, rather than retaining stale watch descriptors.
                 let gone: Vec<_> = watched

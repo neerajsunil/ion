@@ -345,7 +345,7 @@ impl Editor {
 
     /// Shift+Tab: one level less indentation on the selected lines.
     fn outdent(&mut self, cx: &mut Context<Self>) {
-        let unit = " ".repeat(settings::get(cx).tab_size());
+        let unit = settings::get(cx).indent_unit();
         self.update_buffer(cx, |b| {
             b.for_each_selection(|b| b.indent_lines(&unit, true))
         });
@@ -410,6 +410,14 @@ impl Editor {
         let Some(path) = self.path.clone() else {
             return Task::ready(false);
         };
+        let settings = settings::get(cx);
+        let (trim, newline) = (
+            settings.trim_trailing_whitespace,
+            settings.insert_final_newline,
+        );
+        if !self.read_only && (trim || newline) && self.buffer.tidy_for_save(trim, newline) {
+            self.text_changed(cx);
+        }
         // Cloning a rope is O(1), so the UI thread never waits on disk I/O.
         let rope = self.buffer.rope().clone();
         let version = self.buffer.version();
@@ -1223,7 +1231,7 @@ impl Render for Editor {
                 this.outdent(cx)
             }))
             .on_action(multiline!(Tab, |this, cx| if !this.read_only {
-                let spaces = " ".repeat(settings::get(cx).tab_size());
+                let spaces = settings::get(cx).indent_unit();
                 this.update_buffer(cx, |b| {
                     b.for_each_selection(|b| {
                         if b.selection_is_multiline() {

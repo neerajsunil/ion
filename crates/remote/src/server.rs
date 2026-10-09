@@ -101,10 +101,9 @@ fn from_manifest(target: &str, manifest: &[u8]) -> io::Result<(String, String)> 
     let entry = value["artifacts"]
         .as_array()
         .and_then(|items| items.iter().find(|item| item["target"] == target))
-        .ok_or_else(|| {
-            io::Error::other("Server release has no binary for this Linux architecture")
-        })?;
-    let expected = format!("ion-server-{VERSION}-{target}");
+        .ok_or_else(|| io::Error::other("Server release has no binary for this server's system"))?;
+    let expected = release_file(target)
+        .ok_or_else(|| io::Error::other("Server release has an unknown target"))?;
     if entry["file"] != expected {
         return Err(io::Error::other("Invalid server artifact filename"));
     }
@@ -284,21 +283,10 @@ impl<R: BufRead, W: Write> Shell<R, W> {
     fn install(&mut self) -> io::Result<String> {
         let info = self.run(r#"uname -s; uname -m; printf '%s\n' "$HOME""#)?;
         let tail = &info.lines[info.lines.len().saturating_sub(3)..];
-        if info.status != 0 || tail.len() < 3 || tail[0] != "Linux" {
-            return Err(io::Error::other(
-                "Remote projects currently support Linux servers",
-            ));
+        if info.status != 0 || tail.len() < 3 {
+            return Err(io::Error::other("Couldn't identify the server's system"));
         }
-        let target = match tail[1].as_str() {
-            "x86_64" | "amd64" => "x86_64-unknown-linux-musl",
-            "aarch64" | "arm64" => "aarch64-unknown-linux-musl",
-            arch => {
-                return Err(io::Error::other(format!(
-                    "Unsupported remote Linux architecture: {:?}",
-                    Some(arch)
-                )));
-            }
-        };
+        let target = server_target(&tail[0], &tail[1])?;
         let home = Some(tail[2].trim_end_matches('/'))
             .filter(|home| home.starts_with('/'))
             .ok_or_else(|| io::Error::other("Couldn't find your home folder on the server"))?
@@ -307,7 +295,7 @@ impl<R: BufRead, W: Write> Shell<R, W> {
         let artifact = Artifact::locate(target).map_err(obtain)?;
         let hash = &artifact.hash;
         let root = format!("{home}/.ion/server");
-        let leaf = format!("{target}-{}", &hash[..16]);
+        let leaf = format!("{}-{}", platform(target).unwrap_or(target), &hash[..16]);
         let dir = format!("{root}/{VERSION}/{leaf}");
         let destination = format!("{dir}/ion-server");
         if self.probe(&destination).is_err() {
@@ -372,6 +360,46 @@ impl<R: BufRead, W: Write> Shell<R, W> {
             .write_all(format!("exec {} --stdio\n", shell_quote(destination)).as_bytes())?;
         self.writer.flush()
     }
+}
+
+/// The short platform name (`linux-x64`) used for a server build's release
+/// file and install folder; the manifest keys builds by Rust target.
+fn platform(target: &str) -> Option<&'static str> {
+    Some(match target {
+        "x86_64-unknown-linux-musl" => "linux-x64",
+        "aarch64-unknown-linux-musl" => "linux-arm64",
+        "aarch64-apple-darwin" => "macos-arm64",
+        _ => return None,
+    })
+}
+
+fn release_file(target: &str) -> Option<String> {
+    platform(target).map(|platform| format!("ion-server-{VERSION}-{platform}"))
+}
+
+/// The server build for a host, from its `uname -s` and `uname -m`.
+fn server_target(system: &str, arch: &str) -> io::Result<&'static str> {
+    let target = match (system, arch) {
+        ("Linux", "x86_64" | "amd64") => "x86_64-unknown-linux-musl",
+        ("Linux", "aarch64" | "arm64") => "aarch64-unknown-linux-musl",
+        ("Darwin", "arm64") => "aarch64-apple-darwin",
+        ("Darwin", _) => {
+            return Err(io::Error::other(
+                "Remote projects on a Mac need Apple Silicon; Intel Macs aren't supported",
+            ));
+        }
+        ("Linux", _) => {
+            return Err(io::Error::other(format!(
+                "Unsupported remote {system} architecture: {arch:?}"
+            )));
+        }
+        _ => {
+            return Err(io::Error::other(format!(
+                "Remote projects support Linux and macOS servers, not {system:?}"
+            )));
+        }
+    };
+    Ok(target)
 }
 
 /// Removes everything under `root` except `<VERSION>/<leaf>`.
@@ -460,12 +488,30 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn picks_server_target_from_uname() {
+        let target = |system, arch| server_target(system, arch).ok();
+        assert_eq!(target("Linux", "x86_64"), Some("x86_64-unknown-linux-musl"));
+        assert_eq!(target("Linux", "arm64"), Some("aarch64-unknown-linux-musl"));
+        assert_eq!(target("Darwin", "arm64"), Some("aarch64-apple-darwin"));
+        assert_eq!(target("Darwin", "x86_64"), None);
+        assert_eq!(target("Linux", "riscv64"), None);
+        assert_eq!(target("FreeBSD", "amd64"), None);
+        for (system, arch) in [
+            ("Linux", "x86_64"),
+            ("Linux", "aarch64"),
+            ("Darwin", "arm64"),
+        ] {
+            assert!(release_file(target(system, arch).unwrap()).is_some());
+        }
+    }
+
+    #[test]
     fn validates_artifact_before_installing() {
         let target = "x86_64-unknown-linux-musl";
-        let manifest = serde_json::json!({"version":VERSION,"protocol":PROTOCOL,"artifacts":[{"target":target,"file":format!("ion-server-{VERSION}-{target}"),"sha256":digest(b"binary")}]});
+        let manifest = serde_json::json!({"version":VERSION,"protocol":PROTOCOL,"artifacts":[{"target":target,"file":format!("ion-server-{VERSION}-linux-x64"),"sha256":digest(b"binary")}]});
         let bytes = serde_json::to_vec(&manifest).unwrap();
         let (file, hash) = from_manifest(target, &bytes).unwrap();
-        assert_eq!(file, format!("ion-server-{VERSION}-{target}"));
+        assert_eq!(file, format!("ion-server-{VERSION}-linux-x64"));
         let dir = std::env::temp_dir().join(format!("ion-artifact-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let artifact = |contents: &[u8]| {
@@ -487,10 +533,10 @@ mod tests {
 
     #[test]
     fn prune_keeps_only_the_current_server() {
-        let command = prune_command("/home/dev/.ion/server", "x86_64-unknown-linux-musl-0123");
+        let command = prune_command("/home/dev/.ion/server", "linux-x64-0123");
         assert!(command.starts_with("(cd '/home/dev/.ion/server' "));
         assert!(command.contains(&format!("!= '{VERSION}/'")));
-        assert!(command.contains("!= 'x86_64-unknown-linux-musl-0123/'"));
+        assert!(command.contains("!= 'linux-x64-0123/'"));
         assert!(command.ends_with("; true)"));
     }
 

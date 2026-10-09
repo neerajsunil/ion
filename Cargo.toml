@@ -4,7 +4,7 @@ members = ["crates/*"]
 default-members = ["crates/ion"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
@@ -32,7 +32,9 @@ workspace = { path = "crates/workspace", package = "ion_workspace" }
 alacritty_terminal = "0.26"
 embed-resource = "3.0.12"
 futures = "0.3"
-gpui = "0.2.2"
+# macOS: compile Metal shaders at startup (cached by the OS), so building needs
+# only the Command Line Tools, not Xcode. No effect on other platforms.
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 imara-diff = { version = "0.1.8", default-features = false }
 ropey = "1.6"
 ignore = "0.4.33"
@@ -43,6 +45,8 @@ pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# Pure Rust (keeps the static ion-server build free of C code).
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 base64 = "0.22"
 getrandom = "0.3"
 sha1_smol = "1"

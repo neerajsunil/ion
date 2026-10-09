@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, AppContext, Bounds, ClickEvent, Context, CursorStyle, Div, EntityId,
+    AnyElement, AppContext, Bounds, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, EntityId,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point,
     SharedString, Stateful, StatefulInteractiveElement, Styled, Window, canvas, div,
     prelude::FluentBuilder, px, relative,
@@ -15,7 +15,8 @@ use crate::pane::{Axis, DragPreview, DraggedTab, PaneId, PaneNode, Region, Side}
 use crate::workspace::{BAR_HEIGHT, MenuKind, PromptPurpose, Workspace};
 
 /// Width of the grab area between split panes.
-const DIVIDER: f32 = 4.;
+/// The space between split panes: a 1px line with room either side to grab.
+const DIVIDER: f32 = 6.;
 
 /// Screen positions of panes and splits from the last frame, for dragging
 /// dividers and moving focus between panes.
@@ -55,6 +56,26 @@ pub(crate) enum MenuAction {
     CloseOthers(EntityId),
     CloseAll(PaneId),
     RenameTerminal(EntityId),
+}
+
+/// The drop target under `position`: within a quarter of an edge splits
+/// toward that edge (the left and right strips run full height), anywhere
+/// else moves the tab into the pane. Matches the zones in
+/// `render_drop_zones`.
+fn drop_side(bounds: Bounds<Pixels>, position: Point<Pixels>) -> Option<Side> {
+    let x = (position.x - bounds.origin.x) / bounds.size.width;
+    let y = (position.y - bounds.origin.y) / bounds.size.height;
+    if x < 0.25 {
+        Some(Side::Left)
+    } else if x > 0.75 {
+        Some(Side::Right)
+    } else if y < 0.25 {
+        Some(Side::Up)
+    } else if y > 0.75 {
+        Some(Side::Down)
+    } else {
+        None
+    }
 }
 
 impl Workspace {
@@ -123,12 +144,30 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let id = SharedString::from(format!("divider-{region:?}-{path:?}-{divider}"));
+        let dragging = matches!(&self.resize, Some(Resize::Split {
+            region: r, path: p, divider: d, ..
+        }) if *r == region && p.as_slice() == path && *d == divider);
         let path = path.to_vec();
+        let line = div()
+            .bg(if dragging {
+                theme::accent()
+            } else {
+                theme::border()
+            })
+            .group_hover(id.clone(), |line| line.bg(theme::accent()))
+            .map(|line| match axis {
+                Axis::Row => line.w(px(if dragging { 2. } else { 1. })).h_full(),
+                Axis::Column => line.h(px(if dragging { 2. } else { 1. })).w_full(),
+            });
         div()
-            .id(id)
+            .id(id.clone())
+            .group(id)
             .flex_none()
-            .bg(theme::border())
-            .hover(|divider| divider.bg(theme::accent()))
+            .flex()
+            .justify_center()
+            .items_center()
+            .bg(theme::bg())
+            .child(line)
             .map(|el| match axis {
                 Axis::Row => el
                     .w(px(DIVIDER))
@@ -666,10 +705,18 @@ impl Workspace {
     ) {
         let mut entries = Vec::new();
         // Harnesses run on this machine, so remote projects don't offer them.
-        let harnesses = match self.filesystem.remote() {
+        let settings = settings::get(cx);
+        let harnesses: Vec<_> = match self.filesystem.remote() {
             Some(_) => Vec::new(),
-            None => terminal::available_harnesses(),
+            None => terminal::available_harnesses()
+                .into_iter()
+                .filter(|harness| settings.shows_terminal(harness.kind.name()))
+                .collect(),
         };
+        let shells: Vec<_> = terminal::available_shells()
+            .into_iter()
+            .filter(|shell| settings.shows_terminal(&shell.name))
+            .collect();
         if !harnesses.is_empty() {
             entries.push(MenuEntry::Header("New agent".into()));
             for harness in harnesses {
@@ -684,7 +731,7 @@ impl Workspace {
             entries.push(MenuEntry::Separator);
         }
         entries.push(MenuEntry::Header("New terminal with".into()));
-        for shell in terminal::available_shells() {
+        for shell in shells {
             entries.push(self.menu_entry(
                 shell.name.clone(),
                 IconName::SquareTerminal,
@@ -695,8 +742,13 @@ impl Workspace {
         }
         entries.push(MenuEntry::Separator);
         entries.push(
-            MenuEntry::item("Terminal Settings…", |_, window, cx| {
-                window.dispatch_action(Box::new(crate::OpenSettings), cx)
+            MenuEntry::item("Choose Shells and Agents…", |_, window, cx| {
+                window.dispatch_action(
+                    Box::new(crate::settings_view::OpenSettingsAt(
+                        crate::settings_view::Page::Terminal,
+                    )),
+                    cx,
+                )
             })
             .icon(IconName::Settings),
         );
@@ -763,12 +815,30 @@ impl Workspace {
     }
 
     /// Overlay while dragging a tab: drop on an edge to split, in the
-    /// middle to move the tab into this pane.
+    /// middle to move the tab into this pane. The part of the pane the tab
+    /// would take is shaded.
     fn render_drop_zones(&self, id: PaneId, cx: &mut Context<Self>) -> Div {
+        let preview = self
+            .drop_target
+            .filter(|(pane, _)| *pane == id)
+            .map(|(_, side)| {
+                let shade = div()
+                    .absolute()
+                    .bg(theme::accent().opacity(0.12))
+                    .border_2()
+                    .border_color(theme::accent().opacity(0.6))
+                    .rounded(px(4.));
+                match side {
+                    Some(Side::Left) => shade.left_0().top_0().h_full().w(relative(0.5)),
+                    Some(Side::Right) => shade.right_0().top_0().h_full().w(relative(0.5)),
+                    Some(Side::Up) => shade.left_0().top_0().w_full().h(relative(0.5)),
+                    Some(Side::Down) => shade.left_0().bottom_0().w_full().h(relative(0.5)),
+                    None => shade.size_full(),
+                }
+            });
         let zone = |side: Option<Side>| {
             let base = div()
                 .absolute()
-                .drag_over::<DraggedTab>(|zone, _, _, _| zone.bg(theme::active_bg()))
                 .on_drop(
                     cx.listener(move |this, dragged: &DraggedTab, window, cx| match side {
                         Some(side) => this.move_item_to_split(dragged.item, id, side, window, cx),
@@ -812,6 +882,24 @@ impl Workspace {
             .left_0()
             .right_0()
             .bottom_0()
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<DraggedTab>, _, cx| {
+                    let target = event
+                        .bounds
+                        .contains(&event.event.position)
+                        .then(|| (id, drop_side(event.bounds, event.event.position)));
+                    let changed = match target {
+                        Some(target) => this.drop_target != Some(target),
+                        // Leaving this pane clears its preview only.
+                        None => this.drop_target.is_some_and(|(pane, _)| pane == id),
+                    };
+                    if changed {
+                        this.drop_target = target;
+                        cx.notify();
+                    }
+                }),
+            )
+            .children(preview)
             .child(zone(Some(Side::Left)))
             .child(zone(Some(Side::Right)))
             .child(zone(Some(Side::Up)))

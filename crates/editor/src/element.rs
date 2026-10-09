@@ -16,6 +16,7 @@ use crate::editor::DiffRowKind;
 use crate::highlighting::line_runs;
 use crate::layout::{DisplayLine, EditorLayout, VisibleLine};
 use crate::{DiffRow, Editor};
+use settings::{CursorStyle, LineNumbers};
 
 const GUTTER_PADDING_LEFT: f32 = 16.;
 pub(crate) const GUTTER_PADDING_RIGHT: f32 = 20.;
@@ -143,6 +144,9 @@ impl Element for EditorElement {
         let settings = settings::get(cx);
         let tab_width = settings.tab_size();
         let show_git_markers = settings.git_gutter;
+        let line_numbers = settings.line_numbers;
+        let highlight_line = settings.highlight_current_line;
+        let cursor_style = settings.cursor_style;
 
         // Gutter wide enough for the largest line number.
         let digit_width = shape(window, "0".into(), theme::text()).width;
@@ -154,6 +158,8 @@ impl Element for EditorElement {
         let wraps = editor.wraps(cx);
         let digits = match &diff_rows {
             Some(rows) => diff_digits(rows),
+            // Without numbers, the gutter keeps room for fold chevrons.
+            None if line_numbers == LineNumbers::Off => 1,
             None => editor
                 .buffer
                 .line_count()
@@ -361,9 +367,18 @@ impl Element for EditorElement {
                     }
                 }
             } else if !input && start_col == 0 {
-                let number = shape(window, (row + 1).to_string(), color);
-                let number_x = text_left - px(GUTTER_PADDING_RIGHT) - number.width;
-                gutter_numbers.push((number_x, row_top(display_row), number));
+                let label = match line_numbers {
+                    LineNumbers::Off => None,
+                    LineNumbers::Relative if row != cursor_row => {
+                        Some(row.abs_diff(cursor_row).to_string())
+                    }
+                    _ => Some((row + 1).to_string()),
+                };
+                if let Some(label) = label {
+                    let number = shape(window, label, color);
+                    let number_x = text_left - px(GUTTER_PADDING_RIGHT) - number.width;
+                    gutter_numbers.push((number_x, row_top(display_row), number));
+                }
                 // Fold chevrons: always on folded lines, on foldable ones
                 // while the mouse is over the gutter.
                 let folded = can_fold && buffer.is_folded(row);
@@ -567,20 +582,32 @@ impl Element for EditorElement {
                 .iter()
                 .find(|line| line.row == row && line.contains_col(col));
             if let Some(line) = line {
-                cursors.push(fill(
-                    Bounds::new(
-                        point(
-                            line_origin_x + line.x_for_col(col),
-                            row_top(line.display_row),
-                        ),
-                        size(px(CURSOR_WIDTH), line_height),
+                let x = line_origin_x + line.x_for_col(col);
+                let top = row_top(line.display_row);
+                // Block and underline cursors are as wide as the character.
+                let char_width = (line.x_for_col(col + 1) - line.x_for_col(col)).max(digit_width);
+                let bounds = match cursor_style {
+                    CursorStyle::Bar => {
+                        Bounds::new(point(x, top), size(px(CURSOR_WIDTH), line_height))
+                    }
+                    CursorStyle::Block => Bounds::new(point(x, top), size(char_width, line_height)),
+                    CursorStyle::Underline => Bounds::new(
+                        point(x, top + line_height - px(CURSOR_WIDTH)),
+                        size(char_width, px(CURSOR_WIDTH)),
                     ),
-                    theme::accent(),
-                ));
+                };
+                let color = match cursor_style {
+                    // See-through, so the character stays readable.
+                    CursorStyle::Block => theme::accent().opacity(0.45),
+                    _ => theme::accent(),
+                };
+                cursors.push(fill(bounds, color));
             }
         }
         let current_line = cursor_line
-            .filter(|_| !input && selection.is_empty() && all_selections.len() == 1)
+            .filter(|_| {
+                highlight_line && !input && selection.is_empty() && all_selections.len() == 1
+            })
             .map(|line| {
                 fill(
                     Bounds::new(

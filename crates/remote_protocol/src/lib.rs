@@ -4,12 +4,22 @@
 //! Frame: `u32 BE length` (of the rest) + `u8 tag` + payload. Tag 0 is a JSON message, tag 1
 //! is stream data (`u64 BE stream` + bytes; stdin to the server, stdout from it), tag 2 is
 //! stderr data (server to client).
+//!
+//! A tag with [`COMPRESSED`] set carries its body (after any stream number) as an LZ4 block,
+//! preceded by its `u32 LE` uncompressed size. Senders compress bodies of at least
+//! [`COMPRESS_MIN`] bytes when that makes them smaller, so keystrokes and small replies go
+//! as they are while file lists, file contents and command output shrink several times.
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Read, Write};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
+/// Largest frame, and largest body once decompressed.
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+/// Flag on a frame tag: the body is compressed.
+pub const COMPRESSED: u8 = 0x80;
+/// Smaller bodies are sent uncompressed.
+pub const COMPRESS_MIN: usize = 4 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Hello {
@@ -57,6 +67,10 @@ pub enum Operation {
     Exists {
         path: String,
     },
+    /// Those of `paths` that are regular files (following symlinks).
+    Files {
+        paths: Vec<String>,
+    },
     CreateDir {
         path: String,
     },
@@ -75,8 +89,12 @@ pub enum Operation {
     Delete {
         paths: Vec<String>,
     },
+    /// The project's files; answered with an [`IndexUpdate`].
     Index {
         root: String,
+        /// The version of the list the client already holds, to receive only the changes.
+        #[serde(default)]
+        base: Option<String>,
     },
     Search {
         root: String,
@@ -100,6 +118,16 @@ pub struct Text {
 pub struct Entry {
     pub name: String,
     pub is_dir: bool,
+}
+/// A project's file list (paths relative to the root, with `/`). With `base`, `added` and
+/// `removed` are the changes since that version; otherwise `added` is the whole list.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct IndexUpdate {
+    pub version: String,
+    pub base: Option<String>,
+    pub added: Vec<String>,
+    #[serde(default)]
+    pub removed: Vec<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Match {
@@ -190,21 +218,41 @@ const TAG_MESSAGE: u8 = 0;
 const TAG_STDOUT: u8 = 1;
 const TAG_STDERR: u8 = 2;
 
-fn write_tagged(writer: &mut impl Write, tag: u8, prefix: &[u8], body: &[u8]) -> io::Result<()> {
-    let length = 1 + prefix.len() + body.len();
-    if length > MAX_FRAME {
-        return Err(io::Error::other("Ion server message exceeds 64 MiB"));
+/// A whole frame, compressed when that pays. Fails (`InvalidInput`) if the body is too big
+/// for the protocol, so callers can report it instead of losing the connection.
+fn encode_frame(tag: u8, prefix: &[u8], body: &[u8]) -> io::Result<Vec<u8>> {
+    if 1 + prefix.len() + body.len() > MAX_FRAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "The message is too large to send over the connection",
+        ));
     }
+    let compressed = (body.len() >= COMPRESS_MIN)
+        .then(|| lz4_flex::block::compress_prepend_size(body))
+        .filter(|compressed| compressed.len() < body.len());
+    let (tag, body) = match &compressed {
+        Some(compressed) => (tag | COMPRESSED, compressed.as_slice()),
+        None => (tag, body),
+    };
+    let length = 1 + prefix.len() + body.len();
     let mut frame = Vec::with_capacity(4 + length);
     frame.extend_from_slice(&(length as u32).to_be_bytes());
     frame.push(tag);
     frame.extend_from_slice(prefix);
     frame.extend_from_slice(body);
-    writer.write_all(&frame)?;
-    writer.flush()
+    Ok(frame)
+}
+pub fn encode_message(value: &impl Serialize) -> io::Result<Vec<u8>> {
+    encode_frame(TAG_MESSAGE, &[], &serde_json::to_vec(value)?)
 }
 pub fn write_message(writer: &mut impl Write, value: &impl Serialize) -> io::Result<()> {
-    write_tagged(writer, TAG_MESSAGE, &[], &serde_json::to_vec(value)?)
+    writer.write_all(&encode_message(value)?)?;
+    writer.flush()
+}
+/// A stream data frame (stdout, or stderr from the server).
+pub fn encode_data(stream: u64, stderr: bool, bytes: &[u8]) -> io::Result<Vec<u8>> {
+    let tag = if stderr { TAG_STDERR } else { TAG_STDOUT };
+    encode_frame(tag, &stream.to_be_bytes(), bytes)
 }
 pub fn write_data(
     writer: &mut impl Write,
@@ -212,8 +260,18 @@ pub fn write_data(
     stderr: bool,
     bytes: &[u8],
 ) -> io::Result<()> {
-    let tag = if stderr { TAG_STDERR } else { TAG_STDOUT };
-    write_tagged(writer, tag, &stream.to_be_bytes(), bytes)
+    writer.write_all(&encode_data(stream, stderr, bytes)?)?;
+    writer.flush()
+}
+fn decompress(body: &[u8]) -> io::Result<Vec<u8>> {
+    let size = body
+        .get(..4)
+        .map(|size| u32::from_le_bytes(size.try_into().expect("4 bytes")) as usize)
+        .ok_or_else(|| io::Error::other("Invalid compressed Ion server frame"))?;
+    if size > MAX_FRAME {
+        return Err(io::Error::other("Invalid compressed Ion server frame"));
+    }
+    lz4_flex::block::decompress_size_prepended(body).map_err(io::Error::other)
 }
 pub fn read_frame<T: DeserializeOwned>(reader: &mut impl Read) -> io::Result<Option<Frame<T>>> {
     let mut header = [0; 4];
@@ -227,23 +285,37 @@ pub fn read_frame<T: DeserializeOwned>(reader: &mut impl Read) -> io::Result<Opt
     }
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
-    match body[0] {
-        TAG_MESSAGE => serde_json::from_slice(&body[1..])
-            .map(|message| Some(Frame::Message(message)))
-            .map_err(io::Error::other),
+    let compressed = body[0] & COMPRESSED != 0;
+    match body[0] & !COMPRESSED {
+        TAG_MESSAGE => {
+            let json = if compressed {
+                decompress(&body[1..])?
+            } else {
+                body.split_off(1)
+            };
+            serde_json::from_slice(&json)
+                .map(|message| Some(Frame::Message(message)))
+                .map_err(io::Error::other)
+        }
         tag @ (TAG_STDOUT | TAG_STDERR) => {
             if body.len() < 9 {
                 return Err(io::Error::other("Invalid Ion server data frame"));
             }
             let stream = u64::from_be_bytes(body[1..9].try_into().expect("8 bytes"));
+            let bytes = if compressed {
+                decompress(&body[9..])?
+            } else {
+                body.split_off(9)
+            };
             Ok(Some(Frame::Data {
                 stream,
                 stderr: tag == TAG_STDERR,
-                bytes: body.split_off(9),
+                bytes,
             }))
         }
-        tag => Err(io::Error::other(format!(
-            "Unknown Ion server frame tag {tag}"
+        _ => Err(io::Error::other(format!(
+            "Unknown Ion server frame tag {}",
+            body[0]
         ))),
     }
 }
@@ -301,6 +373,68 @@ mod tests {
             } => assert!(bytes.is_empty()),
             other => panic!("{other:?}"),
         }
+    }
+    #[test]
+    fn large_bodies_are_compressed_and_round_trip() {
+        let files: Vec<String> = (0..2000)
+            .map(|n| format!("src/module_{n}/lib.rs"))
+            .collect();
+        let update = IndexUpdate {
+            version: "v".into(),
+            added: files.clone(),
+            ..IndexUpdate::default()
+        };
+        let frame = encode_message(&update).unwrap();
+        assert_eq!(frame[4], TAG_MESSAGE | COMPRESSED);
+        assert!(frame.len() < serde_json::to_vec(&update).unwrap().len() / 3);
+        let decoded: IndexUpdate = match read_frame(&mut frame.as_slice()).unwrap().unwrap() {
+            Frame::Message(message) => message,
+            Frame::Data { .. } => panic!("expected message"),
+        };
+        assert_eq!(decoded.added, files);
+
+        let output = b"Compiling ion v0.2.0\n".repeat(400);
+        let mut bytes = Vec::new();
+        write_data(&mut bytes, 3, true, &output).unwrap();
+        write_data(&mut bytes, 3, false, b"small").unwrap();
+        assert_eq!(bytes[4], TAG_STDERR | COMPRESSED);
+        let mut reader = bytes.as_slice();
+        match read_frame::<ClientMessage>(&mut reader).unwrap().unwrap() {
+            Frame::Data {
+                stream: 3,
+                stderr: true,
+                bytes,
+            } => assert_eq!(bytes, output),
+            other => panic!("{other:?}"),
+        }
+        match read_frame::<ClientMessage>(&mut reader).unwrap().unwrap() {
+            Frame::Data { bytes, .. } => assert_eq!(bytes, b"small"),
+            other => panic!("{other:?}"),
+        }
+    }
+    #[test]
+    fn incompressible_bodies_go_as_they_are() {
+        // A byte sequence LZ4 can't shrink.
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let noise: Vec<u8> = (0..COMPRESS_MIN * 2)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let frame = encode_frame(TAG_STDOUT, &1u64.to_be_bytes(), &noise).unwrap();
+        assert_eq!(frame[4], TAG_STDOUT);
+    }
+    #[test]
+    fn rejects_corrupt_or_oversized_compressed_bodies() {
+        let mut frame = vec![0, 0, 0, 9, TAG_MESSAGE | COMPRESSED];
+        frame.extend_from_slice(&u32::MAX.to_le_bytes());
+        frame.extend_from_slice(&[0; 4]);
+        assert!(read_frame::<ClientMessage>(&mut frame.as_slice()).is_err());
+        let frame = [0, 0, 0, 3, TAG_MESSAGE | COMPRESSED, 1, 2];
+        assert!(read_frame::<ClientMessage>(&mut frame.as_slice()).is_err());
     }
     #[test]
     fn rejects_unknown_tags_and_short_data() {

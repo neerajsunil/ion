@@ -101,6 +101,7 @@ impl Workspace {
         let touched = self.touched.entry(owner).or_default();
         touched.retain(|known| *known != path);
         touched.push(path.clone());
+        self.note_recent_file(path.clone());
         if self
             .following
             .as_ref()

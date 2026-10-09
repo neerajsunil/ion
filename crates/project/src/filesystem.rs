@@ -3,7 +3,7 @@ use crate::{DirEntry, FileIndex, LoadError, LoadedText};
 #[cfg(feature = "remote")]
 use remote::{Connection, posix_path};
 #[cfg(feature = "remote")]
-use remote_protocol::Operation;
+use remote_protocol::{IndexUpdate, Operation};
 use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "remote")]
@@ -96,6 +96,24 @@ impl FileSystem {
             Self::Ssh(connection) => connection.request(Operation::Exists { path: wire(path) }),
         }
     }
+    /// Those of `paths` that are regular files now, in one round trip for
+    /// remote projects.
+    pub fn files_among(&self, paths: Vec<PathBuf>) -> io::Result<Vec<PathBuf>> {
+        match self {
+            Self::Local => Ok(paths.into_iter().filter(|path| path.is_file()).collect()),
+            #[cfg(feature = "remote")]
+            Self::Ssh(connection) => {
+                let files: Vec<String> = connection.request(Operation::Files {
+                    paths: paths.iter().map(|path| wire(path)).collect(),
+                })?;
+                let files: std::collections::HashSet<String> = files.into_iter().collect();
+                Ok(paths
+                    .into_iter()
+                    .filter(|path| files.contains(&wire(path)))
+                    .collect())
+            }
+        }
+    }
     pub fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         match self {
             Self::Local => std::fs::create_dir_all(path),
@@ -168,16 +186,35 @@ impl FileSystem {
             }),
         }
     }
-    pub fn build_index(&self, root: &Path) -> io::Result<FileIndex> {
+    /// The project's files. A remote rebuild given the `previous` index
+    /// fetches only the changes since it.
+    #[cfg_attr(not(feature = "remote"), allow(unused_variables))]
+    pub fn build_index(&self, root: &Path, previous: Option<&FileIndex>) -> io::Result<FileIndex> {
         match self {
             Self::Local => Ok(FileIndex::build(root)),
             #[cfg(feature = "remote")]
             Self::Ssh(connection) => {
-                let paths: Vec<String> = connection.request_job(
-                    Operation::Index { root: wire(root) },
+                let previous = previous.filter(|previous| previous.root == root);
+                let update: IndexUpdate = connection.request_job(
+                    Operation::Index {
+                        root: wire(root),
+                        base: previous.and_then(|previous| previous.version.clone()),
+                    },
                     &std::sync::atomic::AtomicBool::new(false),
                 )?;
-                Ok(FileIndex::from_paths(root.to_path_buf(), paths))
+                let mut index = match (update.base, previous) {
+                    (Some(_), Some(previous)) => {
+                        previous.with_changes(update.added, &update.removed)
+                    }
+                    (Some(_), None) => {
+                        return Err(io::Error::other(
+                            "Ion server sent changes to an unknown list",
+                        ));
+                    }
+                    (None, _) => FileIndex::from_paths(root.to_path_buf(), update.added),
+                };
+                index.version = Some(update.version);
+                Ok(index)
             }
         }
     }
@@ -200,5 +237,14 @@ mod tests {
         assert_eq!(copy.file_name().unwrap(), "first copy.txt");
         assert!(FileSystem::Local.rename(&path, &copy).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn index_changes_apply_to_the_previous_list() {
+        let root = PathBuf::from("/project");
+        let index = FileIndex::from_paths(root, ["b.rs", "a.rs", "src/c.rs"].map(String::from));
+        let next = index.with_changes(vec!["src/d.rs".into(), "0.rs".into()], &["b.rs".into()]);
+        let paths: Vec<&str> = next.files.iter().map(|file| &*file.path).collect();
+        assert_eq!(paths, ["0.rs", "a.rs", "src/c.rs", "src/d.rs"]);
+        assert_eq!(next.files[3].name(), "d.rs");
     }
 }

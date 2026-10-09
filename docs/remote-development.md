@@ -1,7 +1,8 @@
 # Remote development over SSH
 
-Open a folder on a Linux server; files, search, Git and terminals all run
-there.
+Open a folder on a Linux or macOS server; files, search, Git and terminals
+all run there. On a Mac, turn on **System Settings → General → Sharing →
+Remote Login** first.
 
 ## Connecting
 
@@ -20,7 +21,7 @@ palette (**Remote: Connect to SSH…**).
 ### Logging in
 
 Ion runs the system OpenSSH client (`ssh`), so your agent, keys and config work
-as they do in a terminal. On Windows this needs the **OpenSSH Client** optional
+as they do in a terminal. macOS includes it. On Windows this needs the **OpenSSH Client** optional
 feature (Settings > System > Optional features); Ion uses
 `C:\Windows\System32\OpenSSH\ssh.exe`, which talks to the Windows ssh-agent
 service. When `ssh` asks for something (a password, a key passphrase or a
@@ -87,8 +88,8 @@ Terminals start the server's login shell in the project folder, in a pty
 created by `ion-server` on the shared connection. Builds, agents and other commands run on the server. The local
 terminal shell setting applies only to local projects.
 
-Live updates use the server's file system events (Linux inotify), with no
-polling. **File: Refresh Project** reloads the tree, file index, Git status
+Live updates use the server's file system events (inotify on Linux, FSEvents
+on macOS), with no polling. **File: Refresh Project** reloads the tree, file index, Git status
 and open files if watching isn't available. Unsaved changes are never
 overwritten without asking.
 
@@ -109,14 +110,15 @@ reconnects on its own, using the login answers it already holds:
 
 ## How it works
 
-On connecting, Ion checks the server's architecture (Linux x86-64 or ARM64)
-and installs a small static `ion-server` binary in
+On connecting, Ion checks the server's system and architecture (Linux x86-64
+or ARM64, macOS on Apple Silicon) and installs a small `ion-server`
+binary in
 `~/.ion/server/<version>/<architecture>-<checksum>/`, over the SSH connection
 itself. Its SHA-256 checksum is verified before and after the upload, and the
 cached copy is reused while it's intact and reports Ion's version and
 protocol. Otherwise the matching server is installed and the other versions
-under `~/.ion/server` are removed. Binaries bundled with Ion are used
-first; builds without them download the matching release (only when an
+under `~/.ion/server` are removed. The Linux binaries are bundled
+with Ion; macOS servers, and builds without bundled assets, download the matching release (only when an
 install is needed) on the **local** machine, so the server needs no internet
 access, Python or root. Bump the workspace version whenever the protocol
 changes: releases are looked up by version. The server
@@ -126,12 +128,29 @@ connected, behind the host's SSH daemon.
 The connection is one `ssh` process: its stdio first carries a short shell
 bootstrap (check the architecture, install and verify the server), then becomes
 `ion-server --stdio`. File requests, searches, the watcher, Git and terminals
-are multiplexed over it as tagged frames (protocol v2). A reader thread
+are multiplexed over it as tagged frames (protocol v3). A reader thread
 dispatches responses and stream output; a writer thread sends queued frames; a
 ticker thread sleeps until a terminal needs a deferred flush. Requests run
 concurrently on the server, so a search never holds up reads and saves, and a
 new search cancels the previous one. Only the
 requested file contents, paths and bounded search previews cross the network.
+
+Bodies of 4 KiB or more (file contents, file lists, search results, command
+and terminal output) are LZ4-compressed when that makes them smaller; smaller
+messages and keystrokes go as they are, so typing gains no latency. Ion
+leaves `ssh`'s own compression off (it would compress everything with zlib),
+though `Compression yes` in `~/.ssh/config` still applies if you set it.
+
+The file list for Go to File and search is sent whole once. Each later
+rebuild (after files are added, removed or renamed) sends only the
+differences from the version the client holds; the server keeps that version
+in memory for the life of the connection, and a reconnect starts again with
+the whole list.
+
+To see where a slow connection spends its time, start Ion with
+`ION_REMOTE_TRACE=1`. It logs one line to stderr per request (bytes each way,
+and the uncompressed size when that differs, plus time), per finished command or
+terminal, and per watcher event.
 Language servers aren't hosted remotely yet.
 
 ## Building and testing
@@ -140,7 +159,9 @@ Remote projects run the system OpenSSH client, so there is nothing extra to buil
 On Windows the client is an optional feature (Settings > System > Optional
 features > OpenSSH Client).
 
-Build Linux assets before packaging Ion:
+Build Linux assets before packaging Ion (`build-server.ps1` packages only
+the Linux servers; the release workflow also builds the macOS ones on Mac
+runners):
 
 ```powershell
 python -m pip install cargo-zigbuild==0.23.4 ziglang==0.16.0
@@ -148,8 +169,8 @@ python -m pip install cargo-zigbuild==0.23.4 ziglang==0.16.0
 cargo dev
 ```
 
-The packaging script verifies that both files are static ELF binaries for the
-correct architecture and generates `target/server-dist/manifest.json` and
+The packaging script verifies that the Linux files are static ELF binaries
+and the macOS files are Mach-O, each for the correct architecture, and generates `target/server-dist/manifest.json` and
 `SHA256SUMS`. `ion_remote` embeds these files at build time. Set
 `ION_SERVER_ASSETS` to a packaged directory to override the assets for development
 or offline distribution. Without assets Ion obtains its versioned public release.
@@ -158,7 +179,7 @@ Remote users never need the developer build tools.
 `cargo t` covers protocol framing, version compatibility, checksum validation,
 atomic save behavior and the existing tests. Build `ion_server`, then run
 `python scripts/test-server.py target/debug/ion-server.exe` on Windows (omit
-`.exe` on Linux) to exercise the actual server's persistent RPC and OS watcher.
+`.exe` on Linux and macOS) to exercise the actual server's persistent RPC and OS watcher.
 
 For the SSH round trip, install Paramiko and run `python scripts/test-ssh.py`.
 It drives the real system `ssh` against a loopback Paramiko server with
@@ -169,5 +190,6 @@ reuse, file operations, search, remote Git, the watcher and reconnecting after
 a dropped link; on Linux it also covers terminals. The remote shell is Git Bash
 (`/bin/sh` on Linux). On Windows it runs the native server through
 `scripts/test-ssh-proxy.py`, which translates MSYS paths, and skips terminals
-because the server's pty support is Unix-only. The Linux release workflow executes each static binary
-and tests RPC and inotify on its own native architecture before publishing.
+because the server's pty support is Unix-only. The server release workflow executes each binary
+and tests RPC and file events on its own native system and architecture
+before publishing.

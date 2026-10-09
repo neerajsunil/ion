@@ -2,14 +2,40 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
-use remote_protocol::{Entry, MAX_FRAME, Match, Operation, RemoteError, SearchResults, Text};
+use project::FileIndex;
+use remote_protocol::{
+    Entry, IndexUpdate, MAX_FRAME, Match, Operation, RemoteError, SearchResults, Text,
+};
 use serde_json::{Value, json};
 
-#[derive(Default)]
+/// A file index and the version the client knows it by.
+struct Indexed {
+    version: String,
+    index: Arc<FileIndex>,
+}
+
 pub struct Service {
-    indexes: Mutex<HashMap<PathBuf, Arc<project::FileIndex>>>,
+    indexes: Mutex<HashMap<PathBuf, Indexed>>,
+    /// Distinguishes this process's index versions from an earlier server's.
+    instance: u64,
+    next_version: AtomicU64,
+}
+impl Default for Service {
+    fn default() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos() as u64);
+        Self {
+            indexes: Mutex::default(),
+            instance: nanos ^ u64::from(std::process::id()).rotate_left(32),
+            next_version: AtomicU64::new(1),
+        }
+    }
 }
 
 fn path(value: &str) -> io::Result<PathBuf> {
@@ -93,6 +119,15 @@ impl Service {
             }
             IsDir { path: value } => Ok(json!(fs::metadata(path(&value)?)?.is_dir())),
             Exists { path: value } => Ok(json!(path(&value)?.try_exists()?)),
+            Files { paths } => {
+                let mut files = Vec::new();
+                for value in paths {
+                    if path(&value)?.is_file() {
+                        files.push(value);
+                    }
+                }
+                Ok(json!(files))
+            }
             CreateDir { path: value } => {
                 fs::create_dir_all(path(&value)?)?;
                 Ok(Value::Null)
@@ -157,20 +192,48 @@ impl Service {
                 }
                 Ok(Value::Null)
             }
-            Index { root } => {
+            Index { root, base } => {
                 let root = path(&root)?;
-                let index = Arc::new(project::FileIndex::build(&root));
-                let files: Vec<_> = index
-                    .files
+                let index = Arc::new(FileIndex::build(&root));
+                let version = format!(
+                    "{:x}-{}",
+                    self.instance,
+                    self.next_version.fetch_add(1, Ordering::Relaxed)
+                );
+                let previous = self
+                    .lock_indexes()?
+                    .insert(
+                        root,
+                        Indexed {
+                            version: version.clone(),
+                            index: index.clone(),
+                        },
+                    )
+                    .filter(|previous| base.as_ref() == Some(&previous.version));
+                let update = match previous {
+                    Some(previous) => {
+                        let (added, removed) = diff(&previous.index, &index);
+                        // A delta bigger than the list (a different project) isn't worth it.
+                        if added.len() + removed.len() < index.files.len() {
+                            IndexUpdate {
+                                version,
+                                base: Some(previous.version),
+                                added,
+                                removed,
+                            }
+                        } else {
+                            whole(version, &index)
+                        }
+                    }
+                    None => whole(version, &index),
+                };
+                let estimate = update
+                    .added
                     .iter()
-                    .map(|file| file.path.to_string())
-                    .collect();
-                self.indexes
-                    .lock()
-                    .map_err(|_| io::Error::other("Index lock poisoned"))?
-                    .insert(root, index);
-                let estimate = files.iter().map(|file| file.len() + 3).sum();
-                let value = json!(files);
+                    .chain(&update.removed)
+                    .map(|file| file.len() + 3)
+                    .sum();
+                let value = serde_json::to_value(update)?;
                 ensure_fits(&value, estimate)?;
                 Ok(value)
             }
@@ -181,19 +244,21 @@ impl Service {
             } => {
                 let root = path(&root)?;
                 let cached = self
-                    .indexes
-                    .lock()
-                    .map_err(|_| io::Error::other("Index lock poisoned"))?
+                    .lock_indexes()?
                     .get(&root)
-                    .cloned();
+                    .map(|indexed| indexed.index.clone());
+                // Not cached under a version: the client's next Index gets the whole list.
                 let index = match cached {
                     Some(index) => index,
                     None => {
-                        let index = Arc::new(project::FileIndex::build(&root));
-                        self.indexes
-                            .lock()
-                            .map_err(|_| io::Error::other("Index lock poisoned"))?
-                            .insert(root, index.clone());
+                        let index = Arc::new(FileIndex::build(&root));
+                        self.lock_indexes()?.insert(
+                            root,
+                            Indexed {
+                                version: String::new(),
+                                index: index.clone(),
+                            },
+                        );
                         index
                     }
                 };
@@ -223,6 +288,46 @@ impl Service {
                 ensure_fits(&value, estimate)?;
                 Ok(value)
             }
+        }
+    }
+}
+
+impl Service {
+    fn lock_indexes(&self) -> io::Result<std::sync::MutexGuard<'_, HashMap<PathBuf, Indexed>>> {
+        self.indexes
+            .lock()
+            .map_err(|_| io::Error::other("Index lock poisoned"))
+    }
+}
+
+fn whole(version: String, index: &FileIndex) -> IndexUpdate {
+    IndexUpdate {
+        version,
+        base: None,
+        added: index
+            .files
+            .iter()
+            .map(|file| file.path.to_string())
+            .collect(),
+        removed: Vec::new(),
+    }
+}
+
+/// Files in `new` but not `old`, and the reverse. Both lists are sorted.
+fn diff(old: &FileIndex, new: &FileIndex) -> (Vec<String>, Vec<String>) {
+    let (mut added, mut removed) = (Vec::new(), Vec::new());
+    let mut old = old.files.iter().map(|file| &*file.path).peekable();
+    let mut new = new.files.iter().map(|file| &*file.path).peekable();
+    loop {
+        match (old.peek(), new.peek()) {
+            (Some(a), Some(b)) if a == b => {
+                old.next();
+                new.next();
+            }
+            (Some(a), Some(b)) if a < b => removed.extend(old.next().map(str::to_owned)),
+            (_, Some(_)) => added.extend(new.next().map(str::to_owned)),
+            (Some(_), None) => removed.extend(old.next().map(str::to_owned)),
+            (None, None) => return (added, removed),
         }
     }
 }
@@ -272,6 +377,64 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".ion-save-")
         }));
+    }
+    fn index(service: &Service, root: &Path, base: Option<String>) -> IndexUpdate {
+        let value = service
+            .handle(
+                Operation::Index {
+                    root: wire_path(root),
+                    base,
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        serde_json::from_value(value).unwrap()
+    }
+    #[test]
+    fn index_sends_only_changes_since_the_clients_version() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        for name in ["a.rs", "b.rs", "src/c.rs"] {
+            fs::write(root.path().join(name), "").unwrap();
+        }
+        let service = Service::default();
+        let first = index(&service, root.path(), None);
+        assert_eq!(first.base, None);
+        assert_eq!(first.added, ["a.rs", "b.rs", "src/c.rs"]);
+
+        fs::remove_file(root.path().join("b.rs")).unwrap();
+        fs::write(root.path().join("src/d.rs"), "").unwrap();
+        let second = index(&service, root.path(), Some(first.version.clone()));
+        assert_eq!(second.base.as_ref(), Some(&first.version));
+        assert_eq!(second.added, ["src/d.rs"]);
+        assert_eq!(second.removed, ["b.rs"]);
+
+        // An unknown or outdated version gets the whole list.
+        let third = index(&service, root.path(), Some(first.version));
+        assert_eq!(third.base, None);
+        assert_eq!(third.added, ["a.rs", "src/c.rs", "src/d.rs"]);
+        let restarted = index(&Service::default(), root.path(), Some(third.version));
+        assert_eq!(restarted.base, None);
+    }
+    #[test]
+    fn files_keeps_only_existing_regular_files() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("a.rs");
+        fs::write(&file, "").unwrap();
+        let paths = [
+            &file,
+            &root.path().join("gone.rs"),
+            &root.path().to_path_buf(),
+        ];
+        let value = Service::default()
+            .handle(
+                Operation::Files {
+                    paths: paths.iter().map(|path| wire_path(path)).collect(),
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(value, json!([wire_path(&file)]));
     }
     #[test]
     fn refuses_root_deletion_and_destination_overwrite() {

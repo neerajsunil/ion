@@ -66,4 +66,4 @@ Open a project, view and edit files, find files by name.
 - [x] Command palette
 - [x] Markdown preview, image viewer, word wrap
 - [x] Multiple cursors (Ctrl+D, Alt+click) and code folding
-- [ ] macOS (Apple Silicon)
+- [x] macOS (Apple Silicon)

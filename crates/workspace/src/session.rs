@@ -129,6 +129,7 @@ pub enum SavedItem {
         #[serde(default)]
         harness: Option<String>,
     },
+    Problems,
 }
 
 impl SavedNode {
@@ -138,7 +139,7 @@ impl SavedNode {
             SavedNode::Pane { items, .. } => {
                 out.extend(items.iter().filter_map(|item| match item {
                     SavedItem::File { path } => Some(path.clone()),
-                    SavedItem::Terminal { .. } => None,
+                    SavedItem::Terminal { .. } | SavedItem::Problems => None,
                 }))
             }
             SavedNode::Split { children, .. } => {

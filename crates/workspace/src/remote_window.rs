@@ -7,7 +7,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use gpui::{
     App, AppContext, Bounds, Context, Entity, PromptLevel, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, px, size,
+    WindowOptions, point, px, size,
 };
 use project::FileSystem;
 use remote::{Connection, ConnectionState};
@@ -297,7 +297,7 @@ impl Workspace {
 }
 
 /// A new Ion window, centered, with Ion's own title bar.
-pub(crate) fn window_options(cx: &App) -> WindowOptions {
+pub fn window_options(cx: &App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
@@ -307,7 +307,11 @@ pub(crate) fn window_options(cx: &App) -> WindowOptions {
         titlebar: Some(TitlebarOptions {
             title: Some("Ion".into()),
             appears_transparent: true,
-            ..Default::default()
+            // Centers macOS's window buttons in Ion's title bar.
+            traffic_light_position: Some(point(
+                px(crate::chrome::TRAFFIC_LIGHTS_X),
+                px((crate::chrome::TITLE_HEIGHT - 12.) / 2.),
+            )),
         }),
         ..Default::default()
     }

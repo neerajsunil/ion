@@ -1,6 +1,7 @@
 //! The window layout: sidebar, tabs, editor area, terminal panel and status bar.
 
 mod agents;
+mod app_menu;
 mod auto_save;
 mod branch_picker;
 mod chrome;
@@ -13,6 +14,7 @@ mod git_panel;
 mod git_state;
 mod ide;
 mod image_view;
+mod keymap;
 mod markdown_preview;
 mod notify;
 mod palette;
@@ -32,7 +34,10 @@ mod settings_view;
 mod ssh_view;
 mod workspace;
 
+pub use app_menu::init_app_menu;
 pub use ide::{init as init_ide, refresh_folders as refresh_ide_folders};
+pub use keymap::init_keymap;
+pub use remote_window::window_options;
 pub use workspace::*;
 
 /// Key bindings for the workspace and the panels it owns.

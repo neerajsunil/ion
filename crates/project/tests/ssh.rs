@@ -228,13 +228,32 @@ fn ssh_project_round_trip() {
         filesystem.read_dir(path.parent().unwrap()).unwrap().len(),
         2
     );
-    let index = filesystem.build_index(&root).unwrap();
+    let index = filesystem.build_index(&root, None).unwrap();
     assert!(
         index
             .files
             .iter()
             .any(|file| file.path.as_ref() == "src/renamed.rs")
     );
+    // A rebuild fetches only the changes and applies them to the last list.
+    let added = join_path(&root, "src/added.rs");
+    filesystem.create_file(&added).unwrap();
+    let next = filesystem.build_index(&root, Some(&index)).unwrap();
+    assert_ne!(next.version, index.version);
+    assert_eq!(next.files.len(), index.files.len() + 1);
+    assert!(
+        next.files
+            .iter()
+            .any(|file| file.path.as_ref() == "src/added.rs")
+    );
+    let src = join_path(&root, "src");
+    assert_eq!(
+        filesystem
+            .files_among(vec![added.clone(), src, join_path(&root, "gone.rs")])
+            .unwrap(),
+        std::slice::from_ref(&added)
+    );
+    filesystem.delete(std::slice::from_ref(&added)).unwrap();
     let results = project::search::search_with_filesystem(
         &filesystem,
         &index,

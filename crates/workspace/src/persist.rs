@@ -67,6 +67,7 @@ impl Workspace {
                             shell: shell.clone(),
                             harness: harness.map(|kind| kind.command().to_owned()),
                         }),
+                        ItemKind::Problems(_) => Some(SavedItem::Problems),
                         ItemKind::Settings(_) | ItemKind::Preview(_) | ItemKind::Image(_) => None,
                     };
                     if let Some(saved) = saved {
@@ -234,6 +235,7 @@ impl Workspace {
                                 cx,
                             )
                         }
+                        SavedItem::Problems => self.problems_item(window, cx),
                     };
                     if ix == *active {
                         pane.active = pane.items.len();

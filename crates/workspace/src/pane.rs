@@ -1,7 +1,8 @@
 //! Panes and the split layout they live in.
 //!
 //! The editor area and the terminal dock are each a tree of panes. A pane
-//! holds tabs; any tab (file, diff or terminal) can move to any pane.
+//! holds tabs; any tab (file, diff, terminal or Problems) can move to any
+//! pane.
 
 use std::path::PathBuf;
 
@@ -89,6 +90,7 @@ pub(crate) enum ItemKind {
     Settings(Entity<crate::settings_view::SettingsView>),
     Preview(Entity<crate::markdown_preview::MarkdownPreview>),
     Image(Entity<crate::image_view::ImageView>),
+    Problems(Entity<crate::problems::ProblemsView>),
 }
 
 /// One tab.
@@ -105,6 +107,7 @@ impl Item {
             ItemKind::Settings(view) => view.entity_id(),
             ItemKind::Preview(view) => view.entity_id(),
             ItemKind::Image(view) => view.entity_id(),
+            ItemKind::Problems(view) => view.entity_id(),
         }
     }
 
@@ -126,6 +129,7 @@ impl Item {
             ItemKind::Settings(_) => ui::IconName::Settings,
             ItemKind::Preview(_) => ui::IconName::Eye,
             ItemKind::Image(_) => ui::IconName::Image,
+            ItemKind::Problems(_) => ui::IconName::TriangleAlert,
         }
     }
 
@@ -157,6 +161,7 @@ impl Item {
             ItemKind::Settings(view) => view.focus_handle(cx),
             ItemKind::Preview(view) => view.focus_handle(cx),
             ItemKind::Image(view) => view.focus_handle(cx),
+            ItemKind::Problems(view) => view.focus_handle(cx),
         }
     }
 
@@ -169,6 +174,7 @@ impl Item {
             ItemKind::Settings(_) => "Settings".into(),
             ItemKind::Preview(view) => view.read(cx).title(),
             ItemKind::Image(view) => view.read(cx).title(),
+            ItemKind::Problems(view) => view.read(cx).title(),
         }
     }
 
@@ -200,6 +206,7 @@ impl Item {
             ItemKind::Settings(view) => view.clone().into(),
             ItemKind::Preview(view) => view.clone().into(),
             ItemKind::Image(view) => view.clone().into(),
+            ItemKind::Problems(view) => view.clone().into(),
         }
     }
 }

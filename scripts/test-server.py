@@ -10,7 +10,9 @@ import tempfile
 binary = pathlib.Path(sys.argv[1]).resolve()
 
 class Connection:
-    """One `--stdio` connection; frames are length + tag + payload (0 JSON, 1 stdout, 2 stderr)."""
+    """One `--stdio` connection; frames are length + tag + payload (0 JSON, 1 stdout, 2 stderr).
+
+    Bodies of 4 KiB or more may arrive LZ4-compressed (tag | 0x80); this test keeps them small."""
     def __init__(self, process):
         self.process = process
         self.next_id = 0
@@ -33,6 +35,7 @@ class Connection:
         body = self.process.stdout.read(size)
         assert len(body) == size
         tag = body[0]
+        assert not tag & 0x80, "compressed frame: keep test payloads under 4 KiB"
         if tag == 0:
             return ("message", json.loads(body[1:]))
         assert tag in (1, 2), f"unknown tag {tag}"
@@ -66,14 +69,19 @@ with tempfile.TemporaryDirectory(prefix="ion-server-test-") as temp:
     with subprocess.Popen([binary, "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as process:
         rpc = Connection(process)
         kind, hello = rpc.read()
-        assert kind == "message" and hello["protocol"] == 2, hello
+        assert kind == "message" and hello["protocol"] == 3, hello
         file = root / "quote ' é.txt"
         file.write_text("old")
         rpc.request("save_text", path=str(file), text="héllo\nneedle\n", has_bom=True)
         assert file.read_bytes().startswith(b"\xef\xbb\xbf")
         assert rpc.request("read_text", path=str(file))["text"] == "héllo\nneedle\n"
         assert rpc.request("read_dir", path=str(root)) == [dict(name=file.name, is_dir=False)]
-        assert rpc.request("index", root=str(root)) == [file.name]
+        index = rpc.request("index", root=str(root))
+        assert index["base"] is None and index["added"] == [file.name], index
+        (root / "second.txt").write_text("")
+        update = rpc.request("index", root=str(root), base=index["version"])
+        assert update["base"] == index["version"] and update["added"] == ["second.txt"], update
+        (root / "second.txt").unlink()
         matches = rpc.request("search", root=str(root), query="needle", case_sensitive=True)
         assert matches["matches"][0]["line"] == 1
         assert matches["matches"][0]["preview"] == "needle"

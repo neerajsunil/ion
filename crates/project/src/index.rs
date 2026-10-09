@@ -1,5 +1,6 @@
 //! The list of files in a project, for quick open and project search.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -31,6 +32,9 @@ impl IndexedFile {
 pub struct FileIndex {
     pub root: PathBuf,
     pub files: Vec<IndexedFile>,
+    /// The server's version of this list (remote projects), so the next
+    /// rebuild fetches only what changed.
+    pub version: Option<String>,
 }
 
 impl FileIndex {
@@ -80,7 +84,22 @@ impl FileIndex {
                 path: path.into(),
             })
             .collect();
-        Self { root, files }
+        Self {
+            root,
+            files,
+            version: None,
+        }
+    }
+
+    /// This list with `removed` taken out and `added` put in.
+    pub fn with_changes(&self, added: Vec<String>, removed: &[String]) -> Self {
+        let removed: HashSet<&str> = removed.iter().map(String::as_str).collect();
+        let kept = self
+            .files
+            .iter()
+            .filter(|file| !removed.contains(&*file.path))
+            .map(|file| file.path.to_string());
+        Self::from_paths(self.root.clone(), kept.chain(added))
     }
 
     pub fn absolute(&self, file: &IndexedFile) -> PathBuf {

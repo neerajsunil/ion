@@ -3,10 +3,10 @@
 //!
 //! On Windows a toast is shown by a short-lived, hidden Windows PowerShell
 //! process (GPUI has no notification API, and Ion's own code has no
-//! `unsafe` to call WinRT directly). It runs only when a notification is
-//! due, so nothing waits or polls in between.
+//! `unsafe` to call WinRT directly). On macOS `osascript` shows it. Either
+//! runs only when a notification is due, so nothing waits or polls in between.
 
-use gpui::{Context, Entity, SharedString, Window};
+use gpui::{App, Context, Entity, SharedString, Window};
 use terminal::TerminalView;
 
 use crate::workspace::Workspace;
@@ -36,16 +36,47 @@ impl Workspace {
             .and_then(|root| root.file_name())
             .map(|name| format!(" · {}", name.to_string_lossy()))
             .unwrap_or_default();
-        show(&format!("{title}{project}"), &body);
+        show(&format!("{title}{project}"), &body, cx);
     }
 }
 
 /// Shows a notification; failures are ignored (it's only a nudge).
-pub(crate) fn show(title: &str, body: &str) {
+fn show(title: &str, body: &str, cx: &App) {
     #[cfg(windows)]
-    windows_toast(title, body);
-    #[cfg(not(windows))]
-    let _ = (title, body);
+    {
+        windows_toast(title, body);
+        let _ = cx;
+    }
+    #[cfg(target_os = "macos")]
+    mac_notification(title, body, cx);
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = (title, body, cx);
+}
+
+/// Text goes in as arguments, so it needs no AppleScript quoting.
+#[cfg(target_os = "macos")]
+fn mac_notification(title: &str, body: &str, cx: &App) {
+    let child = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "display notification (item 2 of argv) with title (item 1 of argv)",
+            "-e",
+            "end run",
+            title,
+            body,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    // Reaped off the UI thread, so it doesn't linger as a zombie.
+    if let Ok(mut child) = child {
+        cx.background_executor()
+            .spawn(async move { child.wait().ok() })
+            .detach();
+    }
 }
 
 /// The ID of Windows PowerShell's registered app, which may show toasts

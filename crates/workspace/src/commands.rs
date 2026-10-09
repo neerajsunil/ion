@@ -36,7 +36,7 @@ fn command(
     }
 }
 
-pub(crate) fn all_for_workspace(remote: bool) -> Vec<Command> {
+pub(crate) fn all_for_workspace(remote: bool, settings: &settings::Settings) -> Vec<Command> {
     let mut commands: Vec<_> = all()
         .into_iter()
         .filter(|command| remote || !command.action.as_any().is::<DisconnectSsh>())
@@ -47,6 +47,7 @@ pub(crate) fn all_for_workspace(remote: bool) -> Vec<Command> {
         commands.extend(
             terminal::available_harnesses()
                 .into_iter()
+                .filter(|harness| settings.shows_terminal(harness.kind.name()))
                 .map(|harness| agent_command(harness.kind)),
         );
     }
@@ -78,6 +79,7 @@ fn all() -> Vec<Command> {
         command("File", "Save", Some(I::Save), editor::Save),
         command("File", "Save As…", None, SaveAs),
         command("File", "Close Tab", Some(I::X), CloseTab),
+        command("File", "Close All Tabs", Some(I::X), CloseAllTabs),
         command("File", "Reopen Closed Tab", Some(I::Undo2), ReopenClosedTab),
         command("Go", "Go to Line…", None, GoToLine),
         command("Git", "Fetch", Some(I::RefreshCw), GitFetch),
@@ -199,6 +201,12 @@ fn all() -> Vec<Command> {
         command("Preferences", "Settings", Some(I::Settings), OpenSettings),
         command(
             "Preferences",
+            "Keyboard Shortcuts",
+            Some(I::Keyboard),
+            OpenKeyboardShortcuts,
+        ),
+        command(
+            "Preferences",
             "Open settings.json",
             Some(I::FileCode),
             OpenSettingsFile,
@@ -249,13 +257,27 @@ mod tests {
 
     #[test]
     fn disconnect_is_only_offered_in_remote_workspaces() {
-        assert!(matching(&all_for_workspace(false), "disconnect ssh").is_empty());
+        assert!(
+            matching(
+                &all_for_workspace(false, &Default::default()),
+                "disconnect ssh"
+            )
+            .is_empty()
+        );
         assert_eq!(
-            matching(&all_for_workspace(true), "disconnect ssh").len(),
+            matching(
+                &all_for_workspace(true, &Default::default()),
+                "disconnect ssh"
+            )
+            .len(),
             1
         );
         assert_eq!(
-            matching(&all_for_workspace(false), "connect to ssh").len(),
+            matching(
+                &all_for_workspace(false, &Default::default()),
+                "connect to ssh"
+            )
+            .len(),
             1
         );
     }

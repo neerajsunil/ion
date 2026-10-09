@@ -15,20 +15,18 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Instant;
 
 use remote_protocol::{
-    ClientMessage, Frame, MAX_FRAME, Operation, PtySize, RemoteError, ServerMessage, StreamSpec,
-    WatchEvent, read_frame, write_data,
+    ClientMessage, Frame, Operation, PtySize, RemoteError, ServerMessage, StreamSpec, WatchEvent,
+    encode_data, encode_message, read_frame,
 };
 
 use crate::TerminalSize;
 use crate::lock;
 use crate::ssh::StderrTail;
+use crate::trace::{self, Counting, Trace};
 
 pub(crate) type ChannelId = u64;
-enum Outgoing {
-    /// A complete encoded message frame.
-    Message(Vec<u8>),
-    Data(ChannelId, Vec<u8>),
-}
+/// A complete encoded frame, waiting for the writer thread.
+type Outgoing = Vec<u8>;
 
 type OnClosed = Box<dyn FnOnce(String) + Send>;
 
@@ -85,6 +83,7 @@ struct Inner {
     ticks_changed: Condvar,
     on_closed: Mutex<Option<OnClosed>>,
     stderr: Arc<StderrTail>,
+    trace: Option<Trace>,
 }
 
 pub(crate) struct Mux {
@@ -104,25 +103,6 @@ fn remote_error(error: RemoteError) -> io::Error {
         _ => io::ErrorKind::Other,
     };
     io::Error::new(kind, error.message)
-}
-
-/// A message as a frame (`u32` length, tag 0, JSON). Too big for the
-/// protocol fails here, on the caller's side, instead of the writer thread
-/// where it would take the whole link down.
-fn encode_message(message: &ClientMessage) -> io::Result<Vec<u8>> {
-    let json = serde_json::to_vec(message)?;
-    let length = 1 + json.len();
-    if length > MAX_FRAME {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "The request is too large to send over the connection",
-        ));
-    }
-    let mut frame = Vec::with_capacity(4 + length);
-    frame.extend_from_slice(&(length as u32).to_be_bytes());
-    frame.push(0);
-    frame.extend_from_slice(&json);
-    Ok(frame)
 }
 
 fn pty_size(size: TerminalSize) -> PtySize {
@@ -193,11 +173,12 @@ impl Mux {
             ticks_changed: Condvar::new(),
             on_closed: Mutex::new(Some(on_closed)),
             stderr,
+            trace: Trace::from_env(),
         });
         let reader = inner.clone();
         let spawned = std::thread::Builder::new()
             .name("ion-ssh".into())
-            .spawn(move || read_loop(&reader, stdout))
+            .spawn(move || read_loop(&reader, Counting::new(stdout)))
             .and_then(|_| {
                 let writer = inner.clone();
                 std::thread::Builder::new()
@@ -234,6 +215,11 @@ impl Mux {
         let inner = &self.inner;
         let sink = Arc::new(Mutex::new(sink));
         lock(&inner.streams).insert(id, sink.clone());
+        let label = inner.trace.as_ref().map(|_| match &kind {
+            Kind::Exec { pty: Some(_), .. } => "terminal".to_owned(),
+            Kind::Exec { command, .. } => trace::command(command),
+            Kind::Watch { root } => format!("watch {root}"),
+        });
         // The link may have died between the check and the insert, after the
         // reader drained the streams.
         let result = if inner.alive.load(Ordering::Acquire) {
@@ -244,6 +230,9 @@ impl Mux {
         } else {
             Err(lost("SSH connection closed"))
         };
+        if let (Some(trace), Some(label), Ok(sent)) = (&inner.trace, label, &result) {
+            trace.stream(id, label, *sent);
+        }
         if let Err(error) = result
             && lock(&inner.streams).remove(&id).is_some()
         {
@@ -278,6 +267,9 @@ impl Mux {
         };
         let _ = self.inner.send(ClientMessage::Close { stream: id });
         lock(&self.inner.ticks).deadlines.remove(&id);
+        if let Some(trace) = &self.inner.trace {
+            trace.stream_end(id, "closed");
+        }
         (*lock(&sink))(Event::Failed(io::Error::new(
             io::ErrorKind::Interrupted,
             "Channel closed",
@@ -288,16 +280,24 @@ impl Mux {
         let id = self.next_id();
         let (sender, receiver) = mpsc::channel();
         lock(&self.inner.pending).insert(id, sender);
+        let label = self.inner.trace.as_ref().map(|_| trace::method(&operation));
         let result = if self.is_alive() {
             self.inner.send(ClientMessage::Request { id, operation })
         } else {
             Err(lost("SSH connection closed"))
         };
-        if let Err(error) = result {
-            lock(&self.inner.pending).remove(&id);
-            return Err(error);
+        match result {
+            Ok(sent) => {
+                if let (Some(trace), Some(label)) = (&self.inner.trace, label) {
+                    trace.request(id, label, sent);
+                }
+                Ok(Pending { id, receiver })
+            }
+            Err(error) => {
+                lock(&self.inner.pending).remove(&id);
+                Err(error)
+            }
         }
-        Ok(Pending { id, receiver })
     }
 
     pub(crate) fn request(&self, operation: Operation) -> io::Result<serde_json::Value> {
@@ -330,12 +330,21 @@ impl Inner {
         }
     }
 
-    fn send(&self, message: ClientMessage) -> io::Result<()> {
-        self.enqueue(Outgoing::Message(encode_message(&message)?))
+    /// Queues a message; returns its size on the wire.
+    fn send(&self, message: ClientMessage) -> io::Result<usize> {
+        let frame = encode_message(&message)?;
+        let sent = frame.len();
+        self.enqueue(frame)?;
+        Ok(sent)
     }
 
     fn send_data(&self, id: ChannelId, bytes: &[u8]) -> io::Result<()> {
-        self.enqueue(Outgoing::Data(id, bytes.to_vec()))
+        // Encoded (and compressed) here, so the writer thread only writes.
+        let frame = encode_data(id, false, bytes)?;
+        if let Some(trace) = &self.trace {
+            trace.stream_sent(id, frame.len());
+        }
+        self.enqueue(frame)
     }
 
     /// Stops `ssh`; the reader then sees the end of its output and wraps up.
@@ -375,14 +384,23 @@ impl Inner {
         self.set_deadline(id, deadline);
     }
 
-    fn dispatch(&self, message: ServerMessage) {
+    /// Handles one message that took `wire` bytes to arrive.
+    fn dispatch(&self, message: ServerMessage, wire: usize) {
         match message {
             ServerMessage::Response { id, result } => {
+                if let Some(trace) = &self.trace {
+                    trace.response(id, wire, &result);
+                }
                 if let Some(sender) = lock(&self.pending).remove(&id) {
                     let _ = sender.send(result.map_err(remote_error));
                 }
             }
-            ServerMessage::Watch { stream, event } => self.deliver(stream, Event::Watch(event)),
+            ServerMessage::Watch { stream, event } => {
+                if let Some(trace) = &self.trace {
+                    trace.watch(stream, &event, wire);
+                }
+                self.deliver(stream, Event::Watch(event));
+            }
             ServerMessage::Exit {
                 stream,
                 code,
@@ -397,6 +415,10 @@ impl Inner {
                 };
                 (*lock(&sink))(event);
                 lock(&self.ticks).deadlines.remove(&stream);
+                if let Some(trace) = &self.trace {
+                    let how = code.map_or("failed".to_owned(), |code| format!("exit {code}"));
+                    trace.stream_end(stream, &how);
+                }
             }
         }
     }
@@ -435,33 +457,41 @@ impl Inner {
 /// means the link is dying; ending it brings the reader down too.
 fn write_loop(inner: &Inner, mut stdin: ChildStdin, outgoing: &mpsc::Receiver<Outgoing>) {
     while let Ok(frame) = outgoing.recv() {
-        let result = match frame {
-            Outgoing::Message(frame) => stdin.write_all(&frame).and_then(|()| stdin.flush()),
-            Outgoing::Data(id, bytes) => write_data(&mut stdin, id, false, &bytes),
-        };
-        if result.is_err() {
+        if stdin
+            .write_all(&frame)
+            .and_then(|()| stdin.flush())
+            .is_err()
+        {
             inner.end(false);
             return;
         }
     }
 }
 
-fn read_loop(inner: &Inner, mut stdout: BufReader<ChildStdout>) {
+fn read_loop(inner: &Inner, mut stdout: Counting<BufReader<ChildStdout>>) {
     let reason = loop {
-        match read_frame::<ServerMessage>(&mut stdout) {
-            Ok(Some(Frame::Message(message))) => inner.dispatch(message),
+        let before = stdout.count;
+        let frame = read_frame::<ServerMessage>(&mut stdout);
+        let wire = stdout.count - before;
+        match frame {
+            Ok(Some(Frame::Message(message))) => inner.dispatch(message, wire),
             Ok(Some(Frame::Data {
                 stream,
                 stderr,
                 bytes,
-            })) => inner.deliver(
-                stream,
-                if stderr {
-                    Event::Stderr(&bytes)
-                } else {
-                    Event::Stdout(&bytes)
-                },
-            ),
+            })) => {
+                if let Some(trace) = &inner.trace {
+                    trace.stream_received(stream, wire);
+                }
+                inner.deliver(
+                    stream,
+                    if stderr {
+                        Event::Stderr(&bytes)
+                    } else {
+                        Event::Stdout(&bytes)
+                    },
+                );
+            }
             Ok(None) => break "The SSH connection was closed".to_owned(),
             Err(error) => break format!("SSH connection lost: {error}"),
         }
@@ -650,7 +680,7 @@ mod tests {
             id: 1,
             operation: Operation::SaveText {
                 path: "/f".into(),
-                text: "x".repeat(MAX_FRAME),
+                text: "x".repeat(remote_protocol::MAX_FRAME),
                 has_bom: false,
             },
         };

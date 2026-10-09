@@ -1,11 +1,15 @@
 # Development
 
-## Setup (Windows 11)
+## Setup
 
 1. Install [Rust](https://rustup.rs). The exact toolchain version is pinned in
    `rust-toolchain.toml` and installed automatically on first build.
-2. Install Visual Studio 2022 (or Build Tools) with the **Desktop development
-   with C++** workload. It provides the Windows SDK.
+2. Platform tools:
+   - **Windows 11:** Visual Studio 2022 (or Build Tools) with the **Desktop
+     development with C++** workload. It provides the Windows SDK.
+   - **macOS (Apple Silicon):** the Command Line Tools
+     (`xcode-select --install`). GPUI compiles its Metal shaders when Ion
+     starts (`runtime_shaders`), so full Xcode isn't needed.
 3. Optional: `cargo install --locked bacon` for watch mode.
 
 ```bash
@@ -62,3 +66,15 @@ cargo fmt --all
 cargo lint
 cargo t
 ```
+
+## macOS app bundle
+
+`scripts/bundle-macos.sh` builds a release `Ion.app` (icon from
+`crates/ion/resources/ion.icns`, metadata from `Info.plist`) and zips it into
+`dist/`. It signs ad hoc unless `ION_SIGN_IDENTITY` names a Developer ID
+identity. Regenerate the icons with `crates/ion/resources/make_icon.py`.
+
+An app started from Finder or the Dock gets launchd's minimal `PATH`, so Ion
+reads `PATH` from your login shell and restarts itself with it
+(`crates/ion/src/login_path.rs`). Started from a terminal, it keeps that
+terminal's environment.

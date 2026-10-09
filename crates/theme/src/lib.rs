@@ -154,6 +154,8 @@ static LIGHT_MODE: AtomicBool = AtomicBool::new(false);
 static UI_SIZE: AtomicU32 = AtomicU32::new(13);
 static EDITOR_SIZE: AtomicU32 = AtomicU32::new(14);
 static TERMINAL_SIZE: AtomicU32 = AtomicU32::new(14);
+/// Editor line height as a multiple of the font size, times 100.
+static LINE_SPACING: AtomicU32 = AtomicU32::new(150);
 static EDITOR_FONT: RwLock<Option<SharedString>> = RwLock::new(None);
 
 pub fn set_appearance(appearance: Appearance) {
@@ -254,7 +256,13 @@ pub fn editor_font_size() -> Pixels {
 }
 
 pub fn editor_line_height() -> Pixels {
-    px((EDITOR_SIZE.load(Ordering::Relaxed) as f32 * 1.5).round())
+    let factor = LINE_SPACING.load(Ordering::Relaxed) as f32 / 100.;
+    px((EDITOR_SIZE.load(Ordering::Relaxed) as f32 * factor).round())
+}
+
+/// Editor line height as a multiple of the font size.
+pub fn set_line_spacing(factor: f32) {
+    LINE_SPACING.store((factor * 100.).round() as u32, Ordering::Relaxed);
 }
 
 pub fn terminal_font_size() -> Pixels {

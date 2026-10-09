@@ -822,11 +822,17 @@ impl TerminalView {
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.selecting = false;
+        let mut copied = None;
         if let Some(term) = self.term() {
             let mut term = term.lock();
             if term.selection.as_ref().is_some_and(Selection::is_empty) {
                 term.selection = None;
+            } else if term.selection.is_some() && settings::get(cx).terminal_copy_on_select {
+                copied = term.selection_to_string();
             }
+        }
+        if let Some(text) = copied {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
         cx.notify();
     }
@@ -1031,6 +1037,7 @@ mod tests {
 
     #[test]
     fn executable_paths_become_short_titles() {
+        #[cfg(windows)]
         assert_eq!(
             display_title(r"C:\Program Files\PowerShell\7\pwsh.exe"),
             "pwsh"

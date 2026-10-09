@@ -1,4 +1,4 @@
-name: Linux server binaries
+name: Server binaries
 
 on:
   push:
@@ -6,6 +6,8 @@ on:
     tags: ['server-v*']
   pull_request:
   workflow_dispatch:
+  # release.yml builds the servers it bundles with this workflow.
+  workflow_call:
 
 permissions:
   contents: read
@@ -19,6 +21,8 @@ jobs:
             target: x86_64-unknown-linux-musl
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+          - runner: macos-15
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
@@ -26,12 +30,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - name: Test server on Linux
+      - name: Test server
         run: cargo test -p ion_server -p ion_remote_protocol
       - name: Cross compiler
+        if: runner.os == 'Linux'
         run: pip install cargo-zigbuild==0.23.4 ziglang==0.16.0
       - name: Build static server
+        if: runner.os == 'Linux'
         run: cargo zigbuild -p ion_server --release --target ${{ matrix.target }}
+      - name: Build macOS server
+        if: runner.os == 'macOS'
+        run: cargo build -p ion_server --release --target ${{ matrix.target }}
       - name: Execute release binary
         run: target/${{ matrix.target }}/release/ion-server --version
       - name: Test persistent RPC and filesystem notifications
@@ -53,7 +62,7 @@ jobs:
           path: target/downloads
       - name: Package release files
         run: |
-          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin; do
             mkdir -p target/$target/release
             cp target/downloads/$target/ion-server target/$target/release/ion-server
           done

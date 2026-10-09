@@ -2,20 +2,23 @@
 //!
 //! Text is shaped in runs of identically styled cells and each run is placed at
 //! its exact cell position, so columns stay aligned even when a fallback font
-//! has slightly different glyph widths.
+//! has slightly different glyph widths. Box drawing and block characters are
+//! drawn as shapes that fill the cell (see `glyphs`), so lines and pictures
+//! made of them have no gaps between rows.
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 use gpui::{
     App, BorderStyle, Bounds, Element, ElementId, ElementInputHandler, Entity, FontStyle,
-    FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad,
-    Pixels, Point, ShapedLine, StrikethroughStyle, Style, TextRun, UnderlineStyle, Window, fill,
-    font, outline, point, px, relative, size,
+    FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad, Path,
+    PathBuilder, Pixels, Point, ShapedLine, StrikethroughStyle, Style, TextRun, UnderlineStyle,
+    Window, fill, font, outline, point, px, relative, size,
 };
 
 use crate::TerminalView;
 use crate::colors::{dim, resolve, to_hsla};
+use crate::glyphs::{self, Stroke};
 use crate::pty::GridSize;
 
 pub(crate) const PADDING_X: f32 = 10.;
@@ -54,6 +57,14 @@ struct BackgroundRect {
     color: Hsla,
 }
 
+/// A box drawing or block character, drawn by `glyphs`.
+struct GlyphCell {
+    row: usize,
+    col: usize,
+    c: char,
+    color: Hsla,
+}
+
 struct CursorData {
     row: usize,
     col: usize,
@@ -67,7 +78,10 @@ struct CursorData {
 type PositionedLine = (Point<Pixels>, ShapedLine);
 
 pub(crate) struct PrepaintState {
+    /// Cell backgrounds, then box drawing and block characters.
     backgrounds: Vec<PaintQuad>,
+    /// Rounded corners and diagonals.
+    paths: Vec<(Path<Pixels>, Hsla)>,
     text: Vec<PositionedLine>,
     /// The cursor shape, plus the glyph under a block cursor.
     cursor: Option<(PaintQuad, Option<PositionedLine>)>,
@@ -182,6 +196,7 @@ impl Element for TerminalElement {
         let Some(term) = view.term() else {
             return PrepaintState {
                 backgrounds: Vec::new(),
+                paths: Vec::new(),
                 text: Vec::new(),
                 cursor: None,
             };
@@ -191,6 +206,7 @@ impl Element for TerminalElement {
         // the PTY thread is never blocked on text shaping.
         let mut runs: Vec<TextRunData> = Vec::new();
         let mut backgrounds: Vec<BackgroundRect> = Vec::new();
+        let mut glyph_cells: Vec<GlyphCell> = Vec::new();
         let cursor_data;
         {
             let term = term.lock();
@@ -261,6 +277,15 @@ impl Element for TerminalElement {
                 if cell.c == ' ' && !style.underline && !style.strikeout {
                     continue;
                 }
+                if glyphs::is_builtin(cell.c) {
+                    glyph_cells.push(GlyphCell {
+                        row,
+                        col,
+                        c: cell.c,
+                        color: style.fg,
+                    });
+                    continue;
+                }
                 let extends_last = width == 1
                     && runs.last().is_some_and(|last| {
                         last.row == row && last.end_col == col && last.style == style
@@ -318,7 +343,7 @@ impl Element for TerminalElement {
                 origin.y + cell_height * row as f32,
             )
         };
-        let background_quads = backgrounds
+        let mut background_quads: Vec<PaintQuad> = backgrounds
             .into_iter()
             .map(|rect| {
                 fill(
@@ -330,6 +355,49 @@ impl Element for TerminalElement {
                 )
             })
             .collect();
+        let mut paths = Vec::new();
+        let scale = window.scale_factor();
+        for cell in glyph_cells {
+            let top_left = cell_origin(cell.row, cell.col);
+            let Some(glyph) = glyphs::glyph(
+                cell.c,
+                glyphs::Cell {
+                    x: f32::from(top_left.x),
+                    y: f32::from(top_left.y),
+                    width: f32::from(cell_width),
+                    height: f32::from(cell_height),
+                    scale,
+                },
+            ) else {
+                continue;
+            };
+            let color = cell.color.opacity(glyph.alpha);
+            for [left, top, right, bottom] in glyph.rects {
+                background_quads.push(fill(
+                    Bounds::from_corners(point(px(left), px(top)), point(px(right), px(bottom))),
+                    color,
+                ));
+            }
+            if !glyph.strokes.is_empty() {
+                let at = |(x, y): glyphs::Point| point(px(x), px(y));
+                let mut path = PathBuilder::stroke(px(glyph.stroke_width));
+                for stroke in glyph.strokes {
+                    match stroke {
+                        Stroke::Curve([from, a, b, to]) => {
+                            path.move_to(at(from));
+                            path.cubic_bezier_to(at(to), at(a), at(b));
+                        }
+                        Stroke::Line([from, to]) => {
+                            path.move_to(at(from));
+                            path.line_to(at(to));
+                        }
+                    }
+                }
+                if let Ok(path) = path.build() {
+                    paths.push((path, color));
+                }
+            }
+        }
         let text = runs
             .into_iter()
             .map(|run| {
@@ -382,6 +450,7 @@ impl Element for TerminalElement {
 
         PrepaintState {
             backgrounds: background_quads,
+            paths,
             text,
             cursor,
         }
@@ -406,6 +475,9 @@ impl Element for TerminalElement {
         let line_height = theme::terminal_line_height();
         for quad in prepaint.backgrounds.drain(..) {
             window.paint_quad(quad);
+        }
+        for (path, color) in prepaint.paths.drain(..) {
+            window.paint_path(path, color);
         }
         for (origin, line) in &prepaint.text {
             line.paint(*origin, line_height, window, cx).ok();

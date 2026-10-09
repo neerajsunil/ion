@@ -4,202 +4,162 @@
 
 # Ion
 
-### The lightweight IDE for coding with AI agents
+### A simple editor for coding with AI agents
 
-Your agent (Claude Code, Codex, Gemini CLI or whatever you use) writes the code.<br>
-Ion is where you watch it, review it and steer it. Native, fast, and out of your way.
+Your agent writes the code. Ion is where you watch it, review it and steer it.
 
 [![CI](https://github.com/neerajsunil/ion/actions/workflows/ci.yml/badge.svg)](https://github.com/neerajsunil/ion/actions/workflows/ci.yml)
-[![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#license)
-[![Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![Windows 11](https://img.shields.io/badge/platform-Windows%2011-0078d4?logo=windows&logoColor=white)](#install)
 [![Download](https://img.shields.io/github/v/release/neerajsunil/ion?filter=v*&label=download&logo=github)](https://github.com/neerajsunil/ion/releases/latest)
-[![GitHub stars](https://img.shields.io/github/stars/neerajsunil/ion?style=flat&logo=github)](https://github.com/neerajsunil/ion/stargazers)
-[![Last commit](https://img.shields.io/github/last-commit/neerajsunil/ion)](https://github.com/neerajsunil/ion/commits/main)
+[![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#license)
 
-[Features](#features) · [Agents](#works-with-your-agent) · [Stats](#by-the-numbers) · [Install](#install) · [Shortcuts](docs/keybindings.md) · [Roadmap](docs/roadmap.md)
+[Download](#install) · [Features](#what-you-can-do) · [Shortcuts](docs/keybindings.md) · [Roadmap](docs/roadmap.md)
 
-<img src="docs/images/hero.png" alt="Ion IDE showing a Rust file with multiple cursors, the file tree, and an integrated terminal running cargo test" width="100%">
+<img src="docs/images/hero.png" alt="Ion showing a Rust file, the file tree, and a terminal running cargo test" width="100%">
 
 </div>
 
 ## Why Ion
 
-More and more code is written by agents running in a terminal. Your job moves
-from typing code to directing and reviewing it, and most editors weren't built
-for that. Cursor, Windsurf and Zed push their own built-in agent. VS Code works
-with terminal agents, but it's heavy, and the terminal and change review come
-second.
+If you code with Claude Code, Codex, Gemini CLI or another terminal agent,
+most of your day is spent asking for changes and checking them. Ion is built
+for that.
 
-Ion is an open-source code editor built for **AI-assisted coding and vibe
-coding**, made for that workflow:
+It doesn't come with its own AI. Bring the agent you already use, run it in
+Ion's terminal, and Ion helps you keep track of what it's doing. It's free,
+open source, and there's no account to create.
 
-- **Bring your own agent.** No built-in AI, no chat panel, no account, no
-  second subscription. Ion works with any terminal agent and plugs into the
-  ones that offer IDE integrations.
-- **Terminal first.** A GPU-rendered terminal where your agent lives, with
-  tabs, splits and badges when an agent finishes or needs you.
-- **Review everything.** Every file the agent touched, as diffs. Revert a hunk
-  or discard it all.
-- **Native and light.** Written in Rust on [GPUI](https://www.gpui.rs) (the UI
-  framework behind Zed). No Electron, no web view, no background polling, so
-  your CPU goes to agents, builds and tests.
+## What you can do
 
-## Features
+### See what your agent changed
 
-### Review what your agent changed
+Open files update as the agent edits them. The file tree and the margin show
+what changed, and Source Control lists every modified file. Read the diffs
+inline or side by side, and undo any part you don't like.
 
-Open files reload live as the agent edits them. The file tree and gutter mark
-what changed, and the Source Control view lists every modified file. Read the
-diffs inline or side by side, revert a single hunk, or discard everything.
+<img src="docs/images/side-by-side-diff.png" alt="Side-by-side diff of an agent's changes, with a Revert button on each change" width="100%">
 
-<img src="docs/images/side-by-side-diff.png" alt="Side-by-side diff of an agent's changes in Ion's Source Control view, with Revert buttons on each hunk" width="100%">
+### Keep an eye on every agent
 
-### Problems, sent straight back to the agent
+The Agents view shows each agent you're running, whether it's working or
+waiting for you, and the files it changed. Turn on **Follow** to watch the
+file it's editing as it goes. If an agent finishes or needs input while you're
+somewhere else, Ion lets you know.
 
-Ion reads errors and warnings from build and test output in your terminals
-(rustc and cargo, tsc, ESLint, gcc and clang, Go, Python, mypy, ruff, MSBuild
-and more). They're underlined in the editor and listed in the Problems view,
-and **Send to Agent** types them into your agent's prompt. No language server
-setup needed.
+### Send errors back to the agent
 
-<img src="docs/images/problems.png" alt="Ion's Problems view listing a Rust compile error, with a wavy underline and inline message on the failing line" width="100%">
+When a build or test fails in the terminal, Ion picks up the errors, marks
+them in your code and lists them in Problems. Click **Send to Agent** and the
+agent gets the whole list to fix.
 
-### One-click Run
+<img src="docs/images/problems.png" alt="The Problems view listing a compile error, with the failing line underlined" width="100%">
 
-The ▶ button finds your project's tasks: `package.json` scripts (npm, pnpm,
-yarn or bun, picked from your lockfile), Cargo, Go and Makefile targets. Each
-runs in its own named terminal, and Ctrl+click opens `localhost:3000`-style
-links from the output in your browser.
+### Run your project in one click
 
-<img src="docs/images/run-tasks.png" alt="Ion's Run menu listing npm scripts, cargo commands and make targets detected from the project" width="100%">
+The ▶ button finds your project's scripts and targets (npm, pnpm, yarn, bun,
+Cargo, Go and Make) and runs each in its own terminal. Click a
+`localhost:3000` link in the output to open it in your browser.
 
-### Docs, images and plans
+<img src="docs/images/run-tasks.png" alt="The Run menu listing npm scripts, cargo commands and make targets" width="100%">
 
-A live Markdown preview beside the file (handy for an agent's `PLAN.md`), an
-image viewer, and word wrap for prose.
+### Find things quickly
 
-<img src="docs/images/markdown-preview.png" alt="A Markdown file and its live preview side by side in Ion" width="100%">
+Press Ctrl+P to jump to any file. Files you've had open, and files your
+agent just changed, show up first. Paste a location like `src/app.ts:42`
+from the agent's output and you land on that line. Click file paths in
+the terminal to open them too.
 
-### And the editor you'd expect
+### Read plans and docs
 
-- Multiple cursors (Ctrl+D, Ctrl+Shift+L, Alt+click) and code folding
-- Syntax highlighting for 20 languages with incremental tree-sitter parsing
-- Quick open (Ctrl+P), command palette, find and replace, and project-wide search, all respecting `.gitignore`
-- Tiling panes: split editors and terminals, and drag any tab anywhere
-- Git: stage, commit, branches, blame, history, push, pull and sync
-- SSH remote development over your own OpenSSH config ([docs](docs/remote-development.md))
-- Dark, light and system themes, and session restore
+A live Markdown preview sits beside the file, which is handy for an agent's
+`PLAN.md`. There's also an image viewer and word wrap.
+
+<img src="docs/images/markdown-preview.png" alt="A Markdown file and its live preview side by side" width="100%">
+
+### Work on a server
+
+Open a folder on a Linux machine or a Mac over SSH. Files, search, Git and terminals
+all run there, so your agent can too. Ion uses your usual SSH setup.
+[More about remote projects](docs/remote-development.md).
+
+### And the everyday editing basics
+
+- Multiple cursors, code folding and syntax highlighting
+- Find and replace, and search across the project
+- Split editors and terminals, and drag tabs anywhere
+- Git: stage, commit, switch branches, blame, history, push and pull
+- Dark and light themes, and Ion reopens where you left off
+- Searchable settings, and shortcuts you can change to suit you
 
 ## Works with your agent
 
-| | |
-|---|---|
-| **Claude Code** | Ion speaks the `/ide` protocol. Agents started in Ion's terminals connect automatically; elsewhere, run `/ide`. Claude Code can then open files and diffs in Ion, read your selection and the Problems list, and propose edits you accept or reject in a diff tab. |
-| **Codex, Gemini CLI, any CLI agent** | Run it in an Ion terminal (Claude Code and Codex launch from the terminal menu). Send a selection or `file:line` reference with **Ctrl+Alt+K**, drag files onto the terminal, or paste images. |
-| **Every agent** | The Agents view (Ctrl+Shift+A) shows each agent's state and the files it changed. **Follow mode** keeps a live diff of the file it's editing. Get a desktop notification when a hidden agent finishes or needs input. |
+**Claude Code** connects to Ion on its own when you start it in an Ion
+terminal (or run `/ide` from anywhere). It can then open files and diffs in
+Ion, see what you've selected, read your Problems list, and suggest edits you
+accept or reject.
 
-## By the numbers
-
-| | |
-|---|---|
-| **0** | built-in AI, accounts or required sign-ins |
-| **0** | Electron, Node.js or web views |
-| **~0%** | idle CPU target: no polling, no timers while nothing happens ([budgets](docs/performance.md)) |
-| **36k** | lines of Rust, across 17 small crates |
-| **160+** | tests, with clippy at `-D warnings` in CI |
-| **20** | languages highlighted by tree-sitter |
-| **1** | worker pool for background work (GPUI's executor): no Tokio, no Rayon |
+**Codex, Gemini CLI and any other terminal agent** work as they do anywhere
+else. Select some code and press Ctrl+Alt+K to send it to the agent, drag
+files onto the terminal, or paste in an image.
 
 ## Install
 
 **[Download the latest release](https://github.com/neerajsunil/ion/releases/latest)**
-for Windows 11 (x64): extract the zip and run `ion.exe`. It's a single
-portable file with no installer. macOS on Apple Silicon is planned.
+for Windows 11 or a Mac with Apple Silicon.
 
-Ion is in early development and builds aren't code-signed yet, so SmartScreen
-may warn on first launch (**More info → Run anyway**).
+- **Windows:** unzip it and run `ion.exe`. There's no installer.
+- **Mac:** unzip it and drag `Ion.app` to Applications.
 
-### Build from source
+Ion is still early, and the downloads aren't signed yet, so your computer may
+warn you the first time:
 
-1. Install [Rust](https://rustup.rs). The toolchain version is pinned and
-   installs on the first build.
-2. Install Visual Studio 2022 or the Build Tools with the **Desktop
-   development with C++** workload.
-3. Clone and run:
+- **Windows:** choose **More info → Run anyway**.
+- **Mac:** open Ion once, then go to **System Settings → Privacy & Security**
+  and choose **Open Anyway**.
+
+### Build it yourself
+
+You'll need [Rust](https://rustup.rs). On Windows, also install Visual Studio
+Build Tools with **Desktop development with C++**. On a Mac, run
+`xcode-select --install`. Then:
 
 ```bash
 git clone https://github.com/neerajsunil/ion.git
-```
-
-```bash
 cd ion
-```
-
-```bash
 cargo dev
 ```
 
-The first build compiles GPUI and takes a few minutes; after that only Ion's
-own crates rebuild. See [docs/development.md](docs/development.md) for the fast
-dev loop.
+The first build takes a few minutes.
 
-## Keyboard shortcuts
+## Shortcuts
 
-| Shortcut | Action |
+On a Mac, use Cmd where you see Ctrl (except Ctrl+\`, which stays the same).
+
+| Shortcut | What it does |
 |---|---|
-| Ctrl+P | Go to file |
-| Ctrl+Shift+P | Command palette |
+| Ctrl+P | Go to a file |
+| Ctrl+Shift+P | Search all commands |
 | Ctrl+\` | Show or hide the terminal |
+| Ctrl+Shift+A | Agents |
 | Ctrl+Shift+G | Source Control |
-| Ctrl+Shift+A | Agents view |
 | Ctrl+Shift+M | Problems |
-| Ctrl+Alt+K | Send selection to agent |
-| Ctrl+D | Add the next occurrence as a cursor |
-| Ctrl+Shift+[ / ] | Fold / unfold |
+| Ctrl+Alt+K | Send selection to your agent |
 | Ctrl+Shift+V | Markdown preview |
 
-The full list is in [docs/keybindings.md](docs/keybindings.md).
+See [all shortcuts](docs/keybindings.md).
 
-## How it's built
+## What's next
 
-Ion is a Cargo workspace of small crates. The UI crates use GPUI; the logic
-crates (buffer, project, git, syntax, the agent bridge) don't depend on GPUI,
-and CI enforces it. That keeps rebuilds fast and the core testable.
-
-```
-ion (app) ─► workspace ─► editor, file_tree, terminal, ui, settings, theme
-                 │
-                 └─► text, project, syntax, git, fuzzy, bridge, remote   (no GPUI)
-```
-
-Read more in [architecture](docs/architecture.md), [vision](docs/vision.md)
-and [performance](docs/performance.md).
-
-## Roadmap
-
-Most of the foundation, terminal, review and agent bridge work is done. Next
-up are checkpoints (snapshot before a task, roll back after), staging single
-hunks and macOS. See the [roadmap](docs/roadmap.md) and
-[changelog](CHANGELOG.md).
-
-## Star history
-
-<a href="https://star-history.com/#neerajsunil/ion&Date">
-  <img src="https://api.star-history.com/svg?repos=neerajsunil/ion&type=Date" alt="Star history chart for neerajsunil/ion" width="600">
-</a>
+Next up: checkpoints, so you can save a snapshot before a task and roll back
+afterwards, and staging single changes in Git. The [roadmap](docs/roadmap.md)
+has the rest, and the [changelog](CHANGELOG.md) has what's new.
 
 ## Contributing
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first, and
-please keep changes in line with the [vision](docs/vision.md): every feature
-has to earn its place.
+Ideas, bug reports and pull requests are all welcome. Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) first.
 
 ## License
 
-Licensed under either of [Apache License 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT), at your option.
-
-Unless you explicitly state otherwise, any contribution you intentionally submit
-for inclusion in Ion shall be dual licensed as above, without any additional
-terms or conditions.
+Ion is available under the [Apache 2.0](LICENSE-APACHE) or
+[MIT](LICENSE-MIT) license, whichever you prefer. Anything you contribute is
+shared under the same terms.

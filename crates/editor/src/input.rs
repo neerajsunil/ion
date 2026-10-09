@@ -108,7 +108,12 @@ impl EntityInputHandler for Editor {
         // Brackets and quotes typed in code come in pairs.
         let mut chars = text.chars();
         let pair = match (chars.next(), chars.next()) {
-            (Some(c), None) if !self.single_line && !self.input && self.marked_range.is_none() => {
+            (Some(c), None)
+                if !self.single_line
+                    && !self.input
+                    && self.marked_range.is_none()
+                    && settings::get(cx).auto_close_brackets =>
+            {
                 Some(c)
             }
             _ => None,

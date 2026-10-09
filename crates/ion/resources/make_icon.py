@@ -1,4 +1,5 @@
-# Renders the Ion logo to an SVG (in-app) and an ICO (exe, taskbar, window).
+# Renders the Ion logo to an SVG (in-app), an ICO (exe, taskbar, window) and an
+# ICNS (macOS app bundle).
 # Run from the repo root: python crates/ion/resources/make_icon.py  (needs Pillow)
 #
 # The mark: an atom whose shells have cracked open and let an electron escape,
@@ -76,4 +77,6 @@ render(256).save(f'{root}/crates/ion/resources/ion.png')
 sizes = [16, 20, 24, 32, 40, 48, 64, 256]
 frames = [render(s) for s in sizes]
 frames[-1].save(f'{root}/crates/ion/resources/ion.ico', sizes=[(s, s) for s in sizes], append_images=frames[:-1])
+mac_sizes = [16, 32, 64, 128, 256, 512, 1024]
+render(1024).save(f'{root}/crates/ion/resources/ion.icns', append_images=[render(s) for s in mac_sizes[:-1]])
 print('ok')

@@ -148,16 +148,13 @@ impl Workspace {
         // their buffers first (that skips Ion's own saves); many files at once
         // is a checkout or similar, not an agent's edit.
         if !full_refresh && changed.len() <= MAX_AGENT_BATCH {
-            let mut written: Vec<&PathBuf> = changed
+            let candidates: Vec<PathBuf> = changed
                 .iter()
                 .filter(|path| !open.iter().any(|(_, open)| open == *path))
                 .filter(|path| !path.components().any(|part| part.as_os_str() == ".git"))
-                .filter(|path| path.is_file())
+                .cloned()
                 .collect();
-            written.sort();
-            for path in written {
-                self.note_external_change(path.clone(), None, window, cx);
-            }
+            self.note_written_files(candidates, window, cx);
         }
         for (editor, path) in open {
             self.sync_editor_with_disk(editor, path, window, cx);
@@ -182,6 +179,35 @@ impl Workspace {
             }
             self.rebuild_index(true, cx);
         }
+    }
+
+    /// Notes which of `candidates` are files (not folders or deleted paths)
+    /// as an agent's edits. Checked in the background: on a remote project
+    /// that's a request to the server.
+    fn note_written_files(
+        &mut self,
+        candidates: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if candidates.is_empty() {
+            return;
+        }
+        let filesystem = self.filesystem.clone();
+        let files = cx.background_spawn(async move { filesystem.files_among(candidates) });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(mut files) = files.await else {
+                return;
+            };
+            files.sort();
+            this.update_in(cx, |this, window, cx| {
+                for path in files {
+                    this.note_external_change(path, None, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Reloads an open file that changed on disk. Clean buffers update
@@ -271,13 +297,14 @@ impl Workspace {
             return;
         }
         let filesystem = self.filesystem.clone();
+        let previous = self.file_index.clone();
         let indexed_root = root.clone();
         self.index_task = Some(cx.spawn(async move |this, cx| {
             if delayed {
                 cx.background_executor().timer(REINDEX_DELAY).await;
             }
             let index = cx
-                .background_spawn(async move { filesystem.build_index(&root) })
+                .background_spawn(async move { filesystem.build_index(&root, previous.as_deref()) })
                 .await;
             this.update(cx, |this, cx| {
                 this.index_task = None;

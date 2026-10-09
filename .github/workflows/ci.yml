@@ -25,7 +25,7 @@ jobs:
       - run: |
           cargo zigbuild -p ion_server --release --target x86_64-unknown-linux-musl
           cargo zigbuild -p ion_server --release --target aarch64-unknown-linux-musl
-          python scripts/package-server.py
+          python scripts/package-server.py --linux-only
       - uses: actions/upload-artifact@v4
         with:
           name: server-dist
@@ -54,6 +54,34 @@ jobs:
           cargo build -p ion_server
           python scripts/test-server.py target/debug/ion-server.exe
           python scripts/test-ssh.py
+
+      - name: Build
+        run: cargo build --workspace
+
+  macos:
+    name: macOS (fmt, clippy, test, build)
+    needs: server-assets
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo lint
+      - name: Test
+        run: cargo t
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-dist
+          path: target/server-dist
+      - name: SSH integration
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install paramiko==5.0.0
+          cargo build -p ion_server
+          .venv/bin/python scripts/test-server.py target/debug/ion-server
+          .venv/bin/python scripts/test-ssh.py
 
       - name: Build
         run: cargo build --workspace

@@ -5,5 +5,5 @@ foreach ($serverTarget in @("x86_64-unknown-linux-musl", "aarch64-unknown-linux-
     cargo zigbuild -p ion_server --release --target $serverTarget
     if ($LASTEXITCODE) { throw "Server build failed for $serverTarget" }
 }
-python scripts/package-server.py
+python scripts/package-server.py --linux-only
 if ($LASTEXITCODE) { throw "Server packaging failed" }

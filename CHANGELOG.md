@@ -8,6 +8,24 @@ All notable changes to Ion are documented here. The format follows
 
 ### Added
 
+- A new Settings page with a side menu and a search box that looks through
+  every setting and shortcut.
+- Change any keyboard shortcut: click it and press new keys, or remove it.
+  Reset one or all of them anytime (Ctrl+K Ctrl+S).
+- New settings: line spacing, relative line numbers or none, cursor style,
+  highlight the current line, indent with tabs or spaces, turn off bracket
+  closing, trim trailing whitespace and add a final newline on save, terminal
+  copy on select, sidebar on the right, and whether to reopen your last
+  project.
+- Choose which shells and agents appear in the terminal **+** menu, and pick
+  the default shell from a dropdown.
+- More shortcuts: Ctrl+J toggles the terminal, Ctrl+PageDown / Ctrl+PageUp
+  switch tabs, and Ctrl+K Ctrl+W closes all tabs in a pane.
+- Dragging a tab shows where it will land. Split dividers are thinner and
+  easier to grab, and on a Mac double-clicking the title bar zooms the window.
+- macOS on Apple Silicon: native menu bar, title bar laid out around the
+  window buttons, desktop notifications, an `Ion.app` bundle in releases, and
+  your login shell's `PATH` when started from Finder or the Dock.
 - Workspace and crate structure, project docs and CI.
 - App icon: an ionizing atom (flat, ink and orange), shown in the title bar,
   start page, taskbar and on `ion.exe`.
@@ -19,7 +37,7 @@ All notable changes to Ion are documented here. The format follows
   windows; Tab completion of remote folders.
 - Remote servers update themselves: a mismatched server is replaced with the
   matching release (downloaded only when needed) and old versions are removed
-  from `~/.ion/server`. Server release 0.2.0 (protocol 2).
+  from `~/.ion/server`. Server release 0.3.0 (protocol 3).
 - Editor: toggle comment (Ctrl+/), move, duplicate and delete lines, indent
   and outdent selections (Tab / Shift+Tab), auto-closing brackets and quotes.
 - Go to line (Ctrl+G), reopen closed tab (Ctrl+Shift+T), Close All tabs, and
@@ -83,7 +101,9 @@ All notable changes to Ion are documented here. The format follows
   one, and desktop notifications when a hidden agent finishes or needs input.
 - Revert any hunk from a diff or the gutter, and Discard All.
 - Problems (Ctrl+Shift+M): errors and warnings read from build and test
-  output, underlined in the editor, and sent to an agent in one click.
+  output, underlined in the editor, and sent to an agent in one click. They
+  open in a tab in the bottom panel that can be dragged to any pane, like a
+  terminal.
 - Run button: `package.json` scripts, Cargo, Go and Makefile targets, each in
   its own named terminal. Ctrl+click `localhost:PORT` links in output.
 - Side-by-side or inline diffs.
@@ -96,8 +116,24 @@ All notable changes to Ion are documented here. The format follows
   `~/.ssh/config` (including `ProxyJump` and `ProxyCommand`), agent and
   `known_hosts` apply as they do for `ssh`, and building Ion no longer needs
   OpenSSL or Perl. On Windows, Ion needs the OpenSSH Client optional feature.
+- Remote projects use much less bandwidth (protocol 3): after the first
+  load, the file list sends only added and removed paths instead of every
+  path on each change, and file contents, file lists and command output of
+  4 KiB or more are LZ4-compressed (about 8× smaller for file lists).
+  `ION_REMOTE_TRACE=1` logs each remote request's size and time to stderr.
+- Remote projects on a Mac: open a folder over SSH on an Apple Silicon Mac,
+  with files, search, Git, live updates and terminals, as on Linux.
+- Go to File (Ctrl+P) lists recently used and agent-changed files first
+  (labeled "changed by agent" or "open") and ranks them ahead of other
+  equally good matches. Paste `src/a.rs:12:5`, `a.rs(12,5)` or an absolute
+  path in the project to open it at that line.
 
 ### Fixed
 
+- In remote projects, files an agent changed weren't noticed unless they
+  were open: the check for which changed paths are files looked at the local
+  disk. It now asks the server, in one request per batch of changes.
+- Toggle Terminal focused the bottom panel instead of hiding it when the
+  panel was showing but not focused.
 - Deleting to the Recycle Bin crashed Ion.
 - The file tree stopped highlighting the open file.
