@@ -5,11 +5,15 @@ targets = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin"]
 
 [advisories]
 version = 2
+# Flag unmaintained crates Ion uses directly; the ones GPUI pulls in aren't
+# ours to replace. Vulnerabilities are checked everywhere.
+unmaintained = "workspace"
 
 [licenses]
 version = 2
 confidence-threshold = 0.8
 allow = [
+  "0BSD",
   "Apache-2.0",
   "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",

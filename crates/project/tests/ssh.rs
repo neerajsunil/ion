@@ -94,6 +94,27 @@ impl Prompter for Codes {
     }
 }
 
+/// Answers nothing, keeping what was asked: a key login shouldn't ask.
+#[derive(Default)]
+struct Unexpected(std::sync::Mutex<Vec<String>>);
+
+impl Prompter for Unexpected {
+    fn ask(&self, prompt: AuthPrompt) -> Option<Vec<String>> {
+        let fields: Vec<_> = prompt
+            .fields
+            .iter()
+            .map(|field| field.label.as_str())
+            .collect();
+        self.0.lock().unwrap().push(format!(
+            "{} | {} | {}",
+            prompt.title,
+            prompt.instructions,
+            fields.join(", ")
+        ));
+        None
+    }
+}
+
 fn terminal_size() -> remote::TerminalSize {
     remote::TerminalSize {
         cols: 80,
@@ -423,7 +444,11 @@ fn ssh_project_round_trip() {
     // ---- key login and terminals ----------------------------------------------
     let mut key_options = options("dev");
     key_options.identity = Some(PathBuf::from(std::env::var("ION_TEST_SSH_KEY").unwrap()));
-    let key_connection = Connection::connect(key_options, None, &[], None).unwrap();
+    let asked = Arc::new(Unexpected::default());
+    let key_connection = Connection::connect(key_options, None, &[], Some(asked.clone()))
+        .unwrap_or_else(|error| {
+            panic!("key login: {error:?}, asked {:?}", asked.0.lock().unwrap())
+        });
     let key_fs = FileSystem::Ssh(Arc::clone(&key_connection));
     assert_eq!(key_fs.load_text(&renamed).unwrap().text, loaded.text);
     filesystem.delete(&[renamed]).unwrap();

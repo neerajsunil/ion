@@ -107,3 +107,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # Matches rust-toolchain.toml, which the action's container doesn't have.
+          rust-version: "1.99.0"
