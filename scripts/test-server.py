@@ -1,7 +1,8 @@
-"""Exercise the real server process: multiplexed RPC, shell and pty streams, atomic saves, search and OS events."""
+"""Exercise the real server process: multiplexed RPC, shell and pty streams, listeners, atomic saves, search and OS events."""
 import json
 import pathlib
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -69,7 +70,7 @@ with tempfile.TemporaryDirectory(prefix="ion-server-test-") as temp:
     with subprocess.Popen([binary, "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as process:
         rpc = Connection(process)
         kind, hello = rpc.read()
-        assert kind == "message" and hello["protocol"] == 3, hello
+        assert kind == "message" and hello["protocol"] == 4, hello
         file = root / "quote ' é.txt"
         file.write_text("old")
         rpc.request("save_text", path=str(file), text="héllo\nneedle\n", has_bom=True)
@@ -111,6 +112,25 @@ with tempfile.TemporaryDirectory(prefix="ion-server-test-") as temp:
                 out, err, exit = rpc.collect(5, lambda message: False)
                 assert b"xterm-256color" in out and b"30 100" in out and b"got:ping" in out, out
                 assert exit["code"] == 0, exit
+        # Agents on the server reaching the client: a listener, then one accepted connection.
+        rpc.send(dict(type="open", stream=7, spec=dict(type="listen", socket=dict(kind="tcp"))))
+        kind, stream, port = rpc.read()
+        assert kind == "stdout" and stream == 7, (kind, stream, port)
+        rpc.send(dict(type="open", stream=8, spec=dict(type="accept", listener=7)))
+        agent = socket.create_connection(("127.0.0.1", int(port)))
+        agent.sendall(b"ping")
+        kind, stream, data = rpc.read()
+        assert (kind, stream, data) == ("stdout", 8, b"ping"), (kind, stream, data)
+        rpc.send_data(8, b"pong")
+        rpc.send(dict(type="close_input", stream=8))
+        reply = b""
+        while chunk := agent.recv(16):
+            reply += chunk
+        assert reply == b"pong", reply
+        agent.close()
+        out, err, exit = rpc.collect(8, lambda message: False)
+        assert exit["code"] == 0, exit
+        rpc.send(dict(type="close", stream=7))
         rpc.send(dict(type="open", stream=6, spec=dict(type="watch", root=str(root))))
         kind, event = rpc.read()
         assert event["type"] == "watch" and event["stream"] == 6 and event["event"]["ready"], event
@@ -125,4 +145,4 @@ with tempfile.TemporaryDirectory(prefix="ion-server-test-") as temp:
         rpc.send(dict(type="close", stream=6))
         process.stdin.close()
         assert process.wait(timeout=10) == 0
-print("Multiplexed RPC, shell streams, native search, atomic save and filesystem events passed")
+print("Multiplexed RPC, shell streams, listeners, native search, atomic save and filesystem events passed")

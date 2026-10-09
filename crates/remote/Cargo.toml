@@ -22,3 +22,6 @@ futures.workspace = true
 [build-dependencies]
 serde_json.workspace = true
 remote_protocol.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

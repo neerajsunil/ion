@@ -74,6 +74,14 @@ pub enum TerminalEvent {
 /// How long output must pause before it counts as settled.
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
 
+/// What a remote terminal starts, and where.
+#[derive(Clone)]
+struct RemoteLaunch {
+    connection: std::sync::Arc<remote::Connection>,
+    folder: PathBuf,
+    program: remote::Program,
+}
+
 pub struct TerminalView {
     pub(crate) focus_handle: FocusHandle,
     pty: Option<Pty>,
@@ -97,9 +105,9 @@ pub struct TerminalView {
     selecting: bool,
     /// Fractional wheel lines carried over between scroll events.
     scroll_remainder: f32,
-    /// For a remote terminal: where to start a new shell after the
-    /// connection drops.
-    remote: Option<(std::sync::Arc<remote::Connection>, PathBuf)>,
+    /// For a remote terminal: where and what to start again after the
+    /// connection drops or the agent exits.
+    remote: Option<RemoteLaunch>,
     /// The screen line the last command was typed on (prompt and command),
     /// marking where its output starts.
     command_line: Option<String>,
@@ -145,19 +153,28 @@ impl TerminalView {
         view
     }
 
+    /// A terminal on a remote project's server, running a shell or, with
+    /// `harness`, that agent.
     pub fn new_remote(
         connection: std::sync::Arc<remote::Connection>,
         folder: PathBuf,
+        program: remote::Program,
+        harness: Option<HarnessKind>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::create(Some(folder), None, Some(connection), window, cx)
+        let mut view = Self::create(Some(folder), None, Some((connection, program)), window, cx);
+        if let Some(kind) = harness {
+            view.harness = Some(kind);
+            view.title = kind.name().into();
+        }
+        view
     }
 
     fn create(
         working_directory: Option<PathBuf>,
         shell: Option<ShellProfile>,
-        remote: Option<std::sync::Arc<remote::Connection>>,
+        remote: Option<(std::sync::Arc<remote::Connection>, remote::Program)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -169,11 +186,12 @@ impl TerminalView {
             cell_width: 8,
             cell_height: 19,
         };
-        let remote = remote.map(|connection| {
-            let folder = working_directory
+        let remote = remote.map(|(connection, program)| RemoteLaunch {
+            connection,
+            folder: working_directory
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("."));
-            (connection, folder)
+                .unwrap_or_else(|| PathBuf::from(".")),
+            program,
         });
         let (pty, error, events) = Self::start_backend(
             working_directory.clone(),
@@ -221,13 +239,15 @@ impl TerminalView {
     fn start_backend(
         working_directory: Option<PathBuf>,
         shell: Option<&ShellProfile>,
-        remote: Option<(std::sync::Arc<remote::Connection>, PathBuf)>,
+        remote: Option<RemoteLaunch>,
         size: GridSize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Option<Pty>, Option<SharedString>, Option<Task<()>>) {
         let backend = match remote {
-            Some((connection, folder)) => Pty::spawn_remote(connection, folder, size),
+            Some(launch) => {
+                Pty::spawn_remote(launch.connection, launch.folder, &launch.program, size)
+            }
             None => Pty::spawn(working_directory, shell, size),
         };
         match backend {
@@ -304,7 +324,7 @@ impl TerminalView {
         let (pty, error, events) = Self::start_backend(
             self.working_directory.clone(),
             self.shell.as_ref(),
-            None,
+            self.remote.clone(),
             size,
             window,
             cx,

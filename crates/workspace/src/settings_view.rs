@@ -88,7 +88,11 @@ pub struct SettingsView {
     page: Page,
     search: Entity<Editor>,
     font_input: Entity<Editor>,
+    /// This machine's shells, for the default shell.
     shells: Vec<String>,
+    /// The shells and agents the + menu can show: the server's in a remote
+    /// window.
+    menu_shells: Vec<String>,
     agents: Vec<&'static str>,
     shortcuts: Shortcuts,
     menu: Option<Menu>,
@@ -123,7 +127,11 @@ fn matches(query: &str, text: &str) -> bool {
 }
 
 impl SettingsView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        menu_shells: Vec<String>,
+        agents: Vec<&'static str>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let current = settings::get(cx).editor_font_family.clone();
         let font_input = cx.new(|cx| {
             let mut input = Editor::single_line(theme::mono_font(), cx);
@@ -156,14 +164,25 @@ impl SettingsView {
                 .into_iter()
                 .map(|shell| shell.name)
                 .collect(),
-            agents: terminal::available_harnesses()
-                .into_iter()
-                .map(|harness| harness.kind.name())
-                .collect(),
+            menu_shells,
+            agents,
             shortcuts: Shortcuts::new(cx),
             menu: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Updates the + menu's shells and agents (a remote window learns the
+    /// server's after connecting).
+    pub(crate) fn set_terminals(
+        &mut self,
+        menu_shells: Vec<String>,
+        agents: Vec<&'static str>,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu_shells = menu_shells;
+        self.agents = agents;
+        cx.notify();
     }
 
     pub(crate) fn show_page(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -789,7 +808,7 @@ impl SettingsView {
                 control,
             );
         }
-        for (ix, shell) in self.shells.iter().enumerate() {
+        for (ix, shell) in self.menu_shells.iter().enumerate() {
             let control = self.menu_switch(("shell", ix).into(), shell.clone().into(), s, cx);
             add(
                 Page::Terminal,

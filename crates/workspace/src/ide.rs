@@ -1,13 +1,20 @@
 //! Claude Code's IDE integration (`/ide`): the agent sees which file is open
 //! and what's selected, opens files, and proposes edits as diff tabs the
-//! user accepts or rejects.
+//! user accepts or rejects. Codex's `/ide` asks for the active file,
+//! selection and open tabs before each prompt.
 //!
 //! One server per Ion process (in the `bridge` crate) advertises every open
 //! folder. Tool calls go to the window whose folder holds the file, else
 //! the active window. Terminals get the server's port in their environment,
 //! so `claude` started in Ion connects on its own.
+//!
+//! Agents on an SSH server reach Ion through the window's connection:
+//! `ion-server` listens there (a port for Claude Code, Codex's socket) and
+//! each connection is carried back here. A lock file on the server and the
+//! remote terminals' environment point Claude Code at its port.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bridge::{IdeEvent, IdeServer, ToolCall};
@@ -18,6 +25,7 @@ use gpui::{
     IntoElement, ParentElement, StatefulInteractiveElement, Styled, Task, Window, WindowHandle,
     div, px,
 };
+use remote::{Connection, Forward, LocalConnection, RemoteSocket};
 use serde_json::{Value, json};
 
 use crate::diff_view::{self, DiffTarget};
@@ -54,9 +62,11 @@ pub(crate) struct Proposal {
 
 /// Starts the server. Without it (no free port, say) Ion works as before.
 pub fn init(cx: &mut App) {
-    let Ok((server, mut events)) = IdeServer::start("Ion") else {
+    let Ok((mut server, mut events)) = IdeServer::start("Ion") else {
         return;
     };
+    // Another editor (or the Codex app) may already answer Codex; that's fine.
+    server.listen_for_codex().ok();
     terminal::set_extra_env(server.terminal_env());
     let task = cx.spawn(async move |cx| {
         while let Some(event) = events.next().await {
@@ -135,7 +145,124 @@ fn handle_event(event: IdeEvent, cx: &mut App) {
             }
             None => call.reply_error("No Ion window is open"),
         },
+        IdeEvent::Context(request) => {
+            let handle = match request.origin {
+                // From an SSH server: the window whose connection carried it.
+                Some(origin) => workspaces(cx)
+                    .into_iter()
+                    .find(|handle| handle.window_id().as_u64() == origin),
+                None => codex_workspace(&request.workspace_root, cx),
+            };
+            let context = handle.and_then(|handle| {
+                let workspace = handle.read(cx).ok()?;
+                Some(workspace.codex_context(&request.workspace_root, cx))
+            });
+            // Unanswered, Codex hears that no editor has its folder open.
+            if let Some(context) = context {
+                request.reply(context);
+            }
+        }
     }
+}
+
+/// Agents' ways into Ion from one SSH server. Dropping them stops listening.
+pub(crate) struct RemoteIde {
+    _claude: Option<Forward>,
+    _codex: Option<Forward>,
+}
+
+type CodexConnector =
+    Arc<dyn Fn() -> std::io::Result<(std::io::PipeReader, std::io::PipeWriter)> + Send + Sync>;
+
+/// Listens on the server for Claude Code (a port, advertised by a lock file
+/// there and the terminals' environment) and Codex (its socket). Either may
+/// fail, e.g. when another editor already answers Codex there. Blocks.
+fn forward_to_ide(
+    connection: &Connection,
+    port: u16,
+    lock: &str,
+    codex: CodexConnector,
+) -> RemoteIde {
+    let claude = connection
+        .forward(
+            RemoteSocket::Tcp,
+            Arc::new(move || {
+                let stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
+                stream.set_nodelay(true)?;
+                let reader = stream.try_clone()?;
+                let closer = stream.try_clone()?;
+                Ok(LocalConnection {
+                    reader: Box::new(reader),
+                    writer: Box::new(stream),
+                    close: Box::new(move || {
+                        closer.shutdown(std::net::Shutdown::Both).ok();
+                    }),
+                })
+            }),
+        )
+        .ok();
+    let remote_port = claude
+        .as_ref()
+        .map(|forward| forward.address().to_owned())
+        .filter(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
+    if let Some(remote_port) = remote_port {
+        let written = connection
+            .execute(&lock_script(&remote_port), Some(lock.as_bytes()))
+            .is_ok_and(|output| output.status == 0);
+        if written {
+            connection.set_terminal_env(vec![
+                ("CLAUDE_CODE_SSE_PORT".into(), remote_port),
+                ("ENABLE_IDE_INTEGRATION".into(), "true".into()),
+            ]);
+        }
+    }
+    let codex = connection
+        .forward(
+            RemoteSocket::Unix("~/.codex/ipc/ipc.sock".into()),
+            Arc::new(move || {
+                let (reader, writer) = codex()?;
+                // Dropping the writer ends the request thread, which ends the reader.
+                Ok(LocalConnection {
+                    reader: Box::new(reader),
+                    writer: Box::new(writer),
+                    close: Box::new(|| {}),
+                })
+            }),
+        )
+        .ok();
+    RemoteIde {
+        _claude: claude,
+        _codex: codex,
+    }
+}
+
+/// A server-side `sh` script saving the lock file on its stdin (with `"pid":0`)
+/// for `port`. `$PPID` is ion-server, which lives as long as the connection;
+/// Claude Code ignores a lock file whose process is gone.
+fn lock_script(port: &str) -> String {
+    format!(
+        r#"dir="${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}/ide" && mkdir -p "$dir" && sed 's/"pid":0/"pid":'"$PPID"'/' > "$dir/{port}.lock""#
+    )
+}
+
+/// The local window for a Codex started in `folder`: the deepest one holding
+/// it, else one inside it.
+fn codex_workspace(folder: &Path, cx: &App) -> Option<WindowHandle<Workspace>> {
+    let roots: Vec<(WindowHandle<Workspace>, PathBuf)> = workspaces(cx)
+        .into_iter()
+        .filter_map(|handle| {
+            let workspace = handle.read(cx).ok()?;
+            workspace.filesystem.remote().is_none().then_some(())?;
+            Some((handle, workspace.root.clone()?))
+        })
+        .collect();
+    let holding = roots
+        .iter()
+        .filter(|(_, root)| folder.starts_with(root))
+        .max_by_key(|(_, root)| root.components().count());
+    holding
+        .or_else(|| roots.iter().find(|(_, root)| root.starts_with(folder)))
+        .map(|(handle, _)| *handle)
 }
 
 /// The window a call is for: the one whose folder holds the file it names,
@@ -144,15 +271,16 @@ fn target_workspace(call: &ToolCall, cx: &App) -> Option<WindowHandle<Workspace>
     let handles = workspaces(cx);
     let path = ["filePath", "new_file_path", "old_file_path"]
         .iter()
-        .find_map(|name| call.string(name))
-        .map(ide_path);
+        .find_map(|name| call.string(name));
     if let Some(path) = path {
         let owner = handles.iter().find(|handle| {
-            handle
-                .read(cx)
-                .ok()
-                .and_then(|workspace| workspace.root.as_deref())
-                .is_some_and(|root| path.starts_with(root))
+            handle.read(cx).ok().is_some_and(|workspace| {
+                let path = workspace.agent_path(path);
+                workspace
+                    .root
+                    .as_deref()
+                    .is_some_and(|root| path.starts_with(root))
+            })
         });
         if let Some(owner) = owner {
             return Some(*owner);
@@ -262,6 +390,49 @@ fn find_range(
 }
 
 impl Workspace {
+    /// A path or `file://` URI from an agent. Remote projects keep the
+    /// server's `/` separators.
+    fn agent_path(&self, path: &str) -> PathBuf {
+        if self.filesystem.remote().is_none() {
+            return match path.starts_with("file://") {
+                true => uri_path(path),
+                false => ide_path(path),
+            };
+        }
+        let path = match path.strip_prefix("file://") {
+            Some(rest) => percent_decode(rest.strip_prefix("localhost").unwrap_or(rest)),
+            None => path.to_owned(),
+        };
+        PathBuf::from(path)
+    }
+
+    /// Lets agents on this window's SSH server reach Ion (see the module
+    /// docs). Call when the folder changes or the link comes back.
+    pub(crate) fn start_remote_ide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remote_ide = None;
+        let (Some(connection), Some(root)) = (self.filesystem.remote().cloned(), self.root.clone())
+        else {
+            return;
+        };
+        let Some(bridge) = cx.try_global::<IdeBridge>() else {
+            return;
+        };
+        let port = bridge.server.port();
+        let folders = [root.to_string_lossy().into_owned()];
+        // The pid is filled in on the server.
+        let lock = bridge.server.lock_file(&folders, 0, false);
+        let origin = window.window_handle().window_id().as_u64();
+        let codex = bridge.server.codex_connector(origin);
+        let setup = cx.background_spawn(async move {
+            forward_to_ide(&connection, port, &lock, Arc::new(codex))
+        });
+        self.remote_ide_task = Some(cx.spawn(async move |this, cx| {
+            let forwards = setup.await;
+            this.update(cx, |this, _| this.remote_ide = Some(forwards))
+                .ok();
+        }));
+    }
+
     fn display_path(&self, path: &Path) -> String {
         self.root
             .as_ref()
@@ -337,12 +508,12 @@ impl Workspace {
                 }));
             }
             "getDiagnostics" => {
-                let uri = call.string("uri").map(uri_path);
+                let uri = call.string("uri").map(|uri| self.agent_path(uri));
                 let diagnostics = self.ide_diagnostics(uri.as_deref(), cx);
                 call.reply_json(diagnostics);
             }
             "checkDocumentDirty" => {
-                let Some(path) = call.string("filePath").map(ide_path) else {
+                let Some(path) = call.string("filePath").map(|path| self.agent_path(path)) else {
                     return call.reply_error("filePath is required");
                 };
                 let reply = match self.file_editor(&path, cx) {
@@ -395,7 +566,7 @@ impl Workspace {
     }
 
     fn ide_open_file(&mut self, call: ToolCall, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = call.string("filePath").map(ide_path) else {
+        let Some(path) = call.string("filePath").map(|path| self.agent_path(path)) else {
             return call.reply_error("filePath is required");
         };
         let start = call.string("startText").map(str::to_owned);
@@ -435,7 +606,7 @@ impl Workspace {
     }
 
     fn ide_save(&mut self, call: ToolCall, cx: &mut Context<Self>) {
-        let Some(path) = call.string("filePath").map(ide_path) else {
+        let Some(path) = call.string("filePath").map(|path| self.agent_path(path)) else {
             return call.reply_error("filePath is required");
         };
         let Some(editor) = self.file_editor(&path, cx) else {
@@ -469,11 +640,13 @@ impl Workspace {
         let Some(path) = call
             .string("new_file_path")
             .or(call.string("old_file_path"))
-            .map(ide_path)
+            .map(|path| self.agent_path(path))
         else {
             return call.reply_error("new_file_path is required");
         };
-        let old_path = call.string("old_file_path").map(ide_path);
+        let old_path = call
+            .string("old_file_path")
+            .map(|path| self.agent_path(path));
         let tab_name = call.string("tab_name").unwrap_or_default().to_owned();
         let contents = call
             .arguments
@@ -667,6 +840,47 @@ impl Workspace {
         true
     }
 
+    /// Codex's `ideContext`: the active file with its selections, and the
+    /// open tabs. Paths are relative to Codex's folder where possible.
+    fn codex_context(&self, folder: &Path, cx: &App) -> Value {
+        let relative = |path: &Path| match path.strip_prefix(folder) {
+            Ok(rest) => rest.to_string_lossy().replace('\\', "/"),
+            Err(_) => path.to_string_lossy().into_owned(),
+        };
+        let position =
+            |(line, character): (usize, usize)| json!({ "line": line, "character": character });
+        let range = |(start, end)| json!({ "start": position(start), "end": position(end) });
+        let active_file = self.active_file_editor(cx).and_then(|editor| {
+            let editor = editor.read(cx);
+            let path = editor.path()?;
+            let selections = editor.all_selection_points();
+            Some(json!({
+                "label": editor.title().to_string(),
+                "path": relative(path),
+                "fsPath": path.to_string_lossy(),
+                "selection": range(editor.selection_points()),
+                "activeSelectionContent": editor.selected_text(),
+                // One cursor is the selection above; list them only for several.
+                "selections": if selections.len() > 1 {
+                    selections.into_iter().map(range).collect()
+                } else {
+                    Vec::new()
+                },
+            }))
+        });
+        let mut seen = std::collections::HashSet::new();
+        let open_tabs: Vec<Value> = self
+            .items()
+            .filter_map(|(_, item)| {
+                let editor = item.editor()?.read(cx);
+                let path = editor.path()?;
+                seen.insert(path.to_path_buf())
+                    .then(|| json!({ "label": editor.title().to_string(), "path": relative(path) }))
+            })
+            .collect();
+        json!({ "activeFile": active_file, "openTabs": open_tabs })
+    }
+
     /// "Claude Code" in the status bar while an agent is connected.
     pub(crate) fn render_ide_status(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         connected(cx).then(|| {
@@ -735,6 +949,33 @@ mod tests {
         );
         assert_eq!(find_range(text, Some("missing"), None, false), None);
         assert_eq!(find_range(text, None, None, false), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_script_saves_the_lock_with_the_servers_pid() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut shell = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(lock_script("4321"))
+            .env("CLAUDE_CONFIG_DIR", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let lock = r#"{"authToken":"t","pid":0,"transport":"ws"}"#;
+        shell
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(lock.as_bytes())
+            .unwrap();
+        assert!(shell.wait().unwrap().success());
+        let saved = std::fs::read_to_string(dir.path().join("ide").join("4321.lock")).unwrap();
+        let saved: Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved["pid"], json!(std::process::id()));
+        assert_eq!(saved["authToken"], "t");
     }
 
     #[test]

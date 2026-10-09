@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Read, Write};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 /// Largest frame, and largest body once decompressed.
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// Flag on a frame tag: the body is compressed.
@@ -195,6 +195,25 @@ pub enum StreamSpec {
     Watch {
         root: String,
     },
+    /// Listens on the server, for agents there to reach the client. The stream's first
+    /// stdout line is the address (a port, or a socket path); closing it stops listening.
+    Listen {
+        socket: ListenSocket,
+    },
+    /// Waits for one connection to the `listener` stream, then carries its bytes both
+    /// ways. The first stdout data means a connection arrived.
+    Accept {
+        listener: u64,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ListenSocket {
+    /// A loopback TCP port the server picks.
+    Tcp,
+    /// A Unix socket at `path` (`~/` is the home folder), in a folder only the user can
+    /// open. Fails if something already listens there; replaces a dead socket.
+    Unix { path: String },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PtySize {

@@ -26,18 +26,32 @@ pub enum TerminalEvent {
     Error(String),
 }
 
+/// What a remote terminal runs, in the project folder.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Program {
+    /// The user's login shell.
+    #[default]
+    LoginShell,
+    /// Another shell, by path, as a login shell.
+    Shell(String),
+    /// A command such as `claude`, run the way the login shell runs what's
+    /// typed into it, so its `PATH` and environment apply.
+    Command(String),
+}
+
 pub struct Terminal {
     mux: Arc<Mux>,
     id: ChannelId,
 }
 
 impl Terminal {
-    /// Starts the login shell in `folder`. `output` runs on the connection's
+    /// Starts `program` in `folder`. `output` runs on the connection's
     /// reader thread; it can ask for a one-shot `Flush` by returning a deadline,
     /// and returns `None` while idle (no timers).
     pub fn spawn(
         connection: Arc<Connection>,
         folder: PathBuf,
+        program: &Program,
         size: TerminalSize,
         mut output: impl FnMut(TerminalEvent) -> Option<Instant> + Send + 'static,
     ) -> io::Result<Self> {
@@ -54,7 +68,7 @@ impl Terminal {
         });
         let (mux, id) = connection.open(
             Kind::Exec {
-                command: shell_command(&folder),
+                command: shell_command(&folder, program, &connection.terminal_env()),
                 pty: Some(size),
                 merge_stderr: true,
             },
@@ -83,9 +97,24 @@ impl Drop for Terminal {
     }
 }
 
-fn shell_command(folder: &std::path::Path) -> String {
+fn shell_command(folder: &std::path::Path, program: &Program, env: &[(String, String)]) -> String {
+    let run = match program {
+        Program::LoginShell => "\"${SHELL:-/bin/sh}\" -l".to_owned(),
+        Program::Shell(path) => format!("{} -l", shell_quote(path)),
+        Program::Command(command) => format!(
+            "\"${{SHELL:-/bin/sh}}\" -lic {}",
+            shell_quote(&format!("exec {}", shell_quote(command)))
+        ),
+    };
+    let exports: String = env
+        .iter()
+        .filter(|(name, _)| {
+            !name.is_empty() && name.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric())
+        })
+        .map(|(name, value)| format!("export {name}={}; ", shell_quote(value)))
+        .collect();
     format!(
-        "cd -- {} && exec \"${{SHELL:-/bin/sh}}\" -l",
+        "cd -- {} && {exports}exec {run}",
         shell_quote(&posix_path(folder).to_string_lossy())
     )
 }
@@ -96,8 +125,28 @@ mod tests {
     #[test]
     fn shell_directory_is_one_escaped_argument() {
         assert_eq!(
-            shell_command(std::path::Path::new("/home/dev/my 'project")),
+            shell_command(
+                std::path::Path::new("/home/dev/my 'project"),
+                &Program::LoginShell,
+                &[]
+            ),
             "cd -- '/home/dev/my '\\''project' && exec \"${SHELL:-/bin/sh}\" -l"
+        );
+        let folder = std::path::Path::new("/p");
+        assert_eq!(
+            shell_command(folder, &Program::Shell("/bin/zsh".into()), &[]),
+            "cd -- '/p' && exec '/bin/zsh' -l"
+        );
+        assert_eq!(
+            shell_command(
+                folder,
+                &Program::Command("claude".into()),
+                &[
+                    ("PORT".into(), "1 2".into()),
+                    ("bad;name".into(), "x".into())
+                ]
+            ),
+            "cd -- '/p' && export PORT='1 2'; exec \"${SHELL:-/bin/sh}\" -lic 'exec '\\''claude'\\'''"
         );
     }
 }

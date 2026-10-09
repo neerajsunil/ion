@@ -97,7 +97,10 @@ terminal (or run `/ide` from anywhere). It can then open files and diffs in
 Ion, see what you've selected, read your Problems list, and suggest edits you
 accept or reject.
 
-**Codex, Gemini CLI and any other terminal agent** work as they do anywhere
+**Codex** reads your open file, selection and tabs from Ion with each prompt
+once you run `/ide` in it.
+
+**Gemini CLI and any other terminal agent** work as they do anywhere
 else. Select some code and press Ctrl+Alt+K to send it to the agent, drag
 files onto the terminal, or paste in an image.
 

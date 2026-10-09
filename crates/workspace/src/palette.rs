@@ -124,6 +124,7 @@ impl Palette {
         editor: Option<Entity<Editor>>,
         initial: &str,
         remote: bool,
+        agents: Vec<terminal::HarnessKind>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -143,7 +144,7 @@ impl Palette {
             }
         });
         window.focus(&query.focus_handle(cx));
-        let commands = commands::all_for_workspace(remote, settings::get(cx));
+        let commands = commands::all_for_workspace(remote, &agents, settings::get(cx));
         let shortcuts = commands
             .iter()
             .map(|command| command.shortcut(cx))

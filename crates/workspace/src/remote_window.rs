@@ -121,7 +121,37 @@ impl Workspace {
         connection.set_prompter(Some(prompter));
         self.remote_state = Some(connection.state());
         let mut states = connection.subscribe();
+        // The + menu, palette and Agents view offer what the server has.
+        self.remote_tools = None;
+        let tools = cx.background_spawn({
+            let connection = connection.clone();
+            async move {
+                let agents: Vec<&str> = terminal::HarnessKind::ALL
+                    .iter()
+                    .map(|kind| kind.command())
+                    .collect();
+                connection.tools(&agents)
+            }
+        });
         self.remote_tasks = vec![
+            cx.spawn(async move |this, cx| {
+                let Ok(tools) = tools.await else {
+                    return;
+                };
+                this.update(cx, |this, cx| {
+                    this.remote_tools = Some(tools);
+                    let (shells, agents) = this.terminal_names();
+                    let settings = this.items().find_map(|(_, item)| match &item.kind {
+                        crate::pane::ItemKind::Settings(view) => Some(view.clone()),
+                        _ => None,
+                    });
+                    if let Some(view) = settings {
+                        view.update(cx, |view, cx| view.set_terminals(shells, agents, cx));
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }),
             cx.spawn_in(window, async move |this, cx| {
                 while let Some(request) = requests.next().await {
                     if this
@@ -179,6 +209,8 @@ impl Workspace {
             if let Some(root) = self.root.clone() {
                 self.start_watching(&root, window, cx);
             }
+            // The server's listeners ended with the old link.
+            self.start_remote_ide(window, cx);
             self.refresh_project(&RefreshProject, window, cx);
         }
         cx.notify();

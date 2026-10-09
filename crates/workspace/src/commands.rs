@@ -36,21 +36,23 @@ fn command(
     }
 }
 
-pub(crate) fn all_for_workspace(remote: bool, settings: &settings::Settings) -> Vec<Command> {
+/// Every command, with one per installed agent (`agents`: on this machine,
+/// or on the server for a remote project).
+pub(crate) fn all_for_workspace(
+    remote: bool,
+    agents: &[terminal::HarnessKind],
+    settings: &settings::Settings,
+) -> Vec<Command> {
     let mut commands: Vec<_> = all()
         .into_iter()
         .filter(|command| remote || !command.action.as_any().is::<DisconnectSsh>())
         .collect();
-    // Harnesses run on this machine: only the installed ones, and not for
-    // remote projects.
-    if !remote {
-        commands.extend(
-            terminal::available_harnesses()
-                .into_iter()
-                .filter(|harness| settings.shows_terminal(harness.kind.name()))
-                .map(|harness| agent_command(harness.kind)),
-        );
-    }
+    commands.extend(
+        agents
+            .iter()
+            .filter(|kind| settings.shows_terminal(kind.name()))
+            .map(|kind| agent_command(*kind)),
+    );
     commands
 }
 
@@ -260,14 +262,14 @@ mod tests {
     fn disconnect_is_only_offered_in_remote_workspaces() {
         assert!(
             matching(
-                &all_for_workspace(false, &Default::default()),
+                &all_for_workspace(false, &[], &Default::default()),
                 "disconnect ssh"
             )
             .is_empty()
         );
         assert_eq!(
             matching(
-                &all_for_workspace(true, &Default::default()),
+                &all_for_workspace(true, &[], &Default::default()),
                 "disconnect ssh"
             )
             .len(),
@@ -275,7 +277,7 @@ mod tests {
         );
         assert_eq!(
             matching(
-                &all_for_workspace(false, &Default::default()),
+                &all_for_workspace(false, &[], &Default::default()),
                 "connect to ssh"
             )
             .len(),

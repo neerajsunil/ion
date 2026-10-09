@@ -250,6 +250,7 @@ impl Pty {
     pub fn spawn_remote(
         connection: Arc<remote::Connection>,
         folder: PathBuf,
+        program: &remote::Program,
         size: GridSize,
     ) -> io::Result<(Self, UnboundedReceiver<PtyEvent>)> {
         let (tx, rx) = unbounded();
@@ -268,6 +269,7 @@ impl Pty {
         let terminal = remote::Terminal::spawn(
             connection,
             folder,
+            program,
             remote_size(size.window_size()),
             move |event| {
                 match event {

@@ -704,16 +704,15 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let mut entries = Vec::new();
-        // Harnesses run on this machine, so remote projects don't offer them.
+        // Remote projects offer the server's shells and agents.
         let settings = settings::get(cx);
-        let harnesses: Vec<_> = match self.filesystem.remote() {
-            Some(_) => Vec::new(),
-            None => terminal::available_harnesses()
-                .into_iter()
-                .filter(|harness| settings.shows_terminal(harness.kind.name()))
-                .collect(),
-        };
-        let shells: Vec<_> = terminal::available_shells()
+        let harnesses: Vec<_> = self
+            .harnesses()
+            .into_iter()
+            .filter(|harness| settings.shows_terminal(harness.kind.name()))
+            .collect();
+        let shells: Vec<_> = self
+            .shells()
             .into_iter()
             .filter(|shell| settings.shows_terminal(&shell.name))
             .collect();

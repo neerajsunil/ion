@@ -7,7 +7,44 @@ use std::time::Duration;
 use futures::StreamExt;
 use ion_project as project;
 use project::{FileSystem, join_path};
-use remote::{AuthPrompt, ConnectError, Connection, ConnectionOptions, ConnectionState, Prompter};
+use remote::{
+    AuthPrompt, ConnectError, Connection, ConnectionOptions, ConnectionState, LocalConnection,
+    Prompter, RemoteSocket,
+};
+
+/// A local echo server, standing in for Ion's IDE integration.
+fn echo_server() -> remote::Connector {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut reader = stream.try_clone().unwrap();
+                let mut writer = stream;
+                let _ = std::io::copy(&mut reader, &mut writer);
+            });
+        }
+    });
+    Arc::new(move || {
+        let stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
+        let reader = stream.try_clone()?;
+        let closer = stream.try_clone()?;
+        Ok(LocalConnection {
+            reader: Box::new(reader),
+            writer: Box::new(stream),
+            close: Box::new(move || {
+                let _ = closer.shutdown(std::net::Shutdown::Both);
+            }),
+        })
+    })
+}
+
+fn echoes(mut agent: impl std::io::Read + std::io::Write, message: &str) {
+    agent.write_all(message.as_bytes()).unwrap();
+    let mut reply = vec![0u8; message.len()];
+    agent.read_exact(&mut reply).unwrap();
+    assert_eq!(reply, message.as_bytes());
+}
 
 fn port() -> u16 {
     std::env::var("ION_TEST_SSH_PORT")
@@ -79,6 +116,7 @@ fn ready_terminal(
     let terminal = remote::Terminal::spawn(
         connection.clone(),
         root.to_path_buf(),
+        &remote::Program::LoginShell,
         terminal_size(),
         move |event| {
             let _ = tx.send(event);
@@ -157,6 +195,52 @@ fn ssh_project_round_trip() {
     assert!(!format!("{connection:?}").contains("ion-integration"));
     // Trusting a key records it in known_hosts, like ssh.
     drop(Connection::connect(options("dev"), password.clone(), &[], None).unwrap());
+
+    // ---- agents on the server reaching this machine -------------------------
+    // The fixture's "server" is this machine, so its listeners are reachable here.
+    let forward = connection
+        .forward(RemoteSocket::Tcp, echo_server())
+        .unwrap();
+    let remote_port: u16 = forward.address().parse().unwrap();
+    let first = std::net::TcpStream::connect(("127.0.0.1", remote_port)).unwrap();
+    let second = std::net::TcpStream::connect(("127.0.0.1", remote_port)).unwrap();
+    first
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    second
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    echoes(&first, "first connection");
+    echoes(&second, "second, at the same time");
+    echoes(&first, "first again");
+    drop(forward);
+    #[cfg(unix)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("ipc").join("ipc.sock");
+        let path = socket.to_string_lossy().into_owned();
+        let forward = connection
+            .forward(RemoteSocket::Unix(path.clone()), echo_server())
+            .unwrap();
+        assert_eq!(forward.address(), path);
+        let agent = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        agent
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        echoes(&agent, "over a unix socket");
+        // Something already listens: a second forward there fails.
+        assert!(
+            connection
+                .forward(RemoteSocket::Unix(path), echo_server())
+                .is_err()
+        );
+        drop(forward);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while socket.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!socket.exists(), "the server removes its socket");
+    }
 
     // ---- server and files --------------------------------------------------
     let installed = connection.ensure_server().unwrap();
@@ -382,14 +466,19 @@ fn ssh_project_round_trip() {
 
         // A pending synchronized update gets its one-shot flush.
         let (tx, rx) = std::sync::mpsc::channel();
-        let terminal =
-            remote::Terminal::spawn(login, root.clone(), terminal_size(), move |event| {
+        let terminal = remote::Terminal::spawn(
+            login,
+            root.clone(),
+            &remote::Program::LoginShell,
+            terminal_size(),
+            move |event| {
                 let deadline = matches!(event, remote::TerminalEvent::Data(_))
                     .then(|| std::time::Instant::now() + Duration::from_millis(150));
                 let _ = tx.send(event);
                 deadline
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         assert!(matches!(
             rx.recv_timeout(Duration::from_secs(10)).unwrap(),
             remote::TerminalEvent::Data(_)

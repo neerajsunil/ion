@@ -88,6 +88,19 @@ Terminals start the server's login shell in the project folder, in a pty
 created by `ion-server` on the shared connection. Builds, agents and other commands run on the server. The local
 terminal shell setting applies only to local projects.
 
+The **+** menu, the command palette and the Agents view offer the server's
+shells (from `/etc/shells`) and the agent CLIs installed there (Claude Code,
+Codex), found once per connection. An agent starts through the login shell,
+as if typed into a terminal, so its `PATH` and environment apply.
+
+Agents on the server reach Ion's IDE integration through the same
+connection, with no SSH port forwarding. `ion-server` listens on a loopback
+port for Claude Code (and writes its `~/.claude/ide/<port>.lock` there; new
+terminals get `CLAUDE_CODE_SSE_PORT`) and on `~/.codex/ipc/ipc.sock` for
+Codex's `/ide`. Each connection an agent makes is carried over the link to
+Ion, so `/ide` shows the open file and selection as it does locally. If
+something else already answers on the Codex socket, Ion leaves it alone.
+
 Live updates use the server's file system events (inotify on Linux, FSEvents
 on macOS), with no polling. **File: Refresh Project** reloads the tree, file index, Git status
 and open files if watching isn't available. Unsaved changes are never
@@ -128,7 +141,7 @@ connected, behind the host's SSH daemon.
 The connection is one `ssh` process: its stdio first carries a short shell
 bootstrap (check the architecture, install and verify the server), then becomes
 `ion-server --stdio`. File requests, searches, the watcher, Git and terminals
-are multiplexed over it as tagged frames (protocol v3). A reader thread
+are multiplexed over it as tagged frames (protocol v4). A reader thread
 dispatches responses and stream output; a writer thread sends queued frames; a
 ticker thread sleeps until a terminal needs a deferred flush. Requests run
 concurrently on the server, so a search never holds up reads and saves, and a

@@ -1,6 +1,6 @@
 [package]
 name = "ion_bridge"
-description = "The bridge to terminal agents: a local MCP server that harness IDE integrations (Claude Code's /ide) connect to. No UI dependencies."
+description = "The bridge to terminal agents: a local MCP server that harness IDE integrations (Claude Code's /ide) connect to, and the socket Codex's /ide reads context from. No UI dependencies."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,3 +16,9 @@ futures.workspace = true
 getrandom.workspace = true
 serde_json.workspace = true
 sha1_smol.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+interprocess.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

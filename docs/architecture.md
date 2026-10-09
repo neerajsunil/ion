@@ -20,7 +20,7 @@ GPU-accelerated UI framework from Zed.
 | `crates/syntax` | `ion_syntax` | Language detection, tree-sitter parsing, highlight queries | **no** |
 | `crates/fuzzy` | `ion_fuzzy` | File-name matching and ranking | **no** |
 | `crates/git` | `ion_git` | Git status, diffs, blame, history and commits via the `git` CLI | **no** |
-| `crates/bridge` | `ion_bridge` | Local MCP server (WebSocket, JSON-RPC) for harness IDE integrations such as Claude Code's `/ide` | **no** |
+| `crates/bridge` | `ion_bridge` | Local MCP server (WebSocket, JSON-RPC) for harness IDE integrations such as Claude Code's `/ide`, and the socket (named pipe on Windows) Codex's `/ide` reads context from | **no** |
 | `crates/remote` | `ion_remote` | System `ssh` process, server deployment and the multiplexed protocol | **no** |
 | `crates/remote_protocol` | `ion_remote_protocol` | Versioned messages and bounded stdio framing | **no** |
 | `crates/server` | `ion_server` | Remote server for Linux (static) and macOS: file operations, search and native watching | **no** |
@@ -74,7 +74,7 @@ server never listens on a port.
 | File system watcher | One thread receiving OS change notifications (one more watches `.git`) | Blocked in the kernel |
 | Terminal I/O (one per terminal) | Reads the PTY and parses output (`alacritty_terminal`) | Blocked on the PTY |
 | SSH (four per remote connection) | The `ssh` process plus a reader (dispatches frames to requests and streams), a writer (sends queued frames), a stderr collector and a deadline ticker | Blocked on pipes or a condvar; `ssh` itself sends keepalives |
-| Agent bridge | One thread accepting `/ide` connections, plus one per connected agent reading its socket | Blocked in `accept` or on the socket |
+| Agent bridge | One thread accepting `/ide` connections, plus one per connected agent reading its socket; one accepting Codex's context requests, plus one per request; per remote project, one per agent connection forwarded from the server | Blocked in `accept` or on the socket |
 | Burst workers | Parallel directory walk (indexing) and project search | Exist only while working |
 
 Rules:

@@ -575,10 +575,7 @@ impl Workspace {
             .text_size(theme::ui_font_size_small())
             .text_color(theme::text_faint())
             .child("No terminals are open.");
-        let harnesses = match self.filesystem.remote() {
-            Some(_) => Vec::new(),
-            None => terminal::available_harnesses(),
-        };
+        let harnesses = self.harnesses();
         let start = |id: SharedString, icon: IconName, label: SharedString| {
             div()
                 .id(id)

@@ -52,7 +52,7 @@ Open a project, view and edit files, find files by name.
 - [x] Launch installed agent harnesses (Claude Code, Codex) from the terminal menu and palette
 - [x] Agents view: every agent and shell with its state and the files it changed
 - [x] Follow mode: a live diff tab of the file an agent is editing, on its latest edit
-- [x] Harness IDE integrations where available (Claude Code's `/ide`)
+- [x] Harness IDE integrations where available (Claude Code's and Codex's `/ide`)
 - [x] Desktop notifications when a hidden agent finishes or needs input
 - [x] Problems: errors and warnings read from build and test output, underlined in editors, sent to an agent
 - [x] Run button: `package.json` scripts, Cargo, Go and Makefile targets in named terminals

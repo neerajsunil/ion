@@ -51,7 +51,7 @@ All notable changes to Ion are documented here. The format follows
   windows; Tab completion of remote folders.
 - Remote servers update themselves: a mismatched server is replaced with the
   matching release (downloaded only when needed) and old versions are removed
-  from `~/.ion/server`. Server release 0.3.0 (protocol 3).
+  from `~/.ion/server`. Server release 0.4.0 (protocol 4).
 - Editor: toggle comment (Ctrl+/), move, duplicate and delete lines, indent
   and outdent selections (Tab / Shift+Tab), auto-closing brackets and quotes.
 - Go to line (Ctrl+G), reopen closed tab (Ctrl+Shift+T), Close All tabs, and
@@ -111,6 +111,13 @@ All notable changes to Ion are documented here. The format follows
 - Multi-line commit messages.
 - Claude Code `/ide` integration: agents open files and diffs in Ion, read
   the selection and diagnostics, and propose edits you accept or reject.
+- Codex `/ide` integration: type `/ide` in Codex and it sees Ion's open
+  file, selection and open tabs.
+- In remote projects, Claude Code's and Codex's `/ide` work from agents
+  running on the server, carried over the project's SSH connection (no port
+  forwarding needed). Protocol 4.
+- Go to Symbol in File (Ctrl+Shift+O, or `@` in the palette), format on
+  save with the language's usual formatter, and auto-indent on Enter.
 - Send to Agent (Ctrl+Alt+K), drop files onto a terminal, paste images into
   one, and desktop notifications when a hidden agent finishes or needs input.
 - Revert any hunk from a diff or the gutter, and Discard All.
@@ -159,6 +166,9 @@ All notable changes to Ion are documented here. The format follows
 - In remote projects, files an agent changed weren't noticed unless they
   were open: the check for which changed paths are files looked at the local
   disk. It now asks the server, in one request per batch of changes.
+- In remote projects, the terminal **+** menu, the command palette, the
+  Agents view and Settings listed this machine's shells and agents instead of
+  the server's. They now list and run the server's.
 - Toggle Terminal focused the bottom panel instead of hiding it when the
   panel was showing but not focused.
 - Deleting to the Recycle Bin crashed Ion.

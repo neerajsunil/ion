@@ -166,7 +166,46 @@ impl Workspace {
         }
     }
 
-    /// A terminal tab. Remote projects always get a remote shell.
+    /// The shells new terminals can start: this machine's, or the server's
+    /// for a remote project (none until they're known).
+    pub(crate) fn shells(&self) -> Vec<ShellProfile> {
+        if self.filesystem.remote().is_none() {
+            return terminal::available_shells();
+        }
+        let paths = self.remote_tools.iter().flat_map(|tools| &tools.shells);
+        paths
+            .map(|path| ShellProfile {
+                name: path.rsplit('/').next().unwrap_or(path).to_owned(),
+                program: path.clone(),
+                args: vec!["-l".into()],
+            })
+            .collect()
+    }
+
+    /// Names of the shells and agents the + menu can offer, for Settings.
+    pub(crate) fn terminal_names(&self) -> (Vec<String>, Vec<&'static str>) {
+        let shells = self.shells().into_iter().map(|shell| shell.name).collect();
+        let agents = self.harnesses().iter().map(|h| h.kind.name()).collect();
+        (shells, agents)
+    }
+
+    /// The agents new terminals can start: installed on this machine, or on
+    /// the server for a remote project.
+    pub(crate) fn harnesses(&self) -> Vec<Harness> {
+        if self.filesystem.remote().is_none() {
+            return terminal::available_harnesses();
+        }
+        let names = self.remote_tools.iter().flat_map(|tools| &tools.agents);
+        names
+            .filter_map(|name| terminal::HarnessKind::from_command(name))
+            .map(|kind| Harness {
+                kind,
+                path: PathBuf::from(kind.command()),
+            })
+            .collect()
+    }
+
+    /// A terminal tab. Remote projects run it on the server.
     pub(crate) fn terminal_item(
         &mut self,
         cwd: Option<PathBuf>,
@@ -185,7 +224,13 @@ impl Workspace {
             (Some(connection), _) => {
                 let connection = connection.clone();
                 let folder = cwd.clone().unwrap_or_else(|| PathBuf::from("."));
-                cx.new(|cx| TerminalView::new_remote(connection, folder, window, cx))
+                let program = match (&harness, &shell) {
+                    (Some(harness), _) => remote::Program::Command(harness.kind.command().into()),
+                    (None, Some(shell)) => remote::Program::Shell(shell.program.clone()),
+                    (None, None) => remote::Program::LoginShell,
+                };
+                let kind = harness.as_ref().map(|harness| harness.kind);
+                cx.new(|cx| TerminalView::new_remote(connection, folder, program, kind, window, cx))
             }
             (None, Some(harness)) => {
                 cx.new(|cx| TerminalView::new_harness(cwd.clone(), harness, window, cx))
@@ -346,8 +391,9 @@ impl Workspace {
             self.activate_item(pane, ix, window, cx);
             return;
         }
+        let (shells, agents) = self.terminal_names();
         let view = cx.new(|cx| {
-            let mut view = crate::settings_view::SettingsView::new(cx);
+            let mut view = crate::settings_view::SettingsView::new(shells, agents, cx);
             if let Some(page) = page {
                 view.show_page(page, cx);
             }

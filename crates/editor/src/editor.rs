@@ -284,6 +284,21 @@ impl Editor {
         )
     }
 
+    /// Every selection (one per cursor) as zero-based (row, column) pairs.
+    pub fn all_selection_points(&self) -> Vec<((usize, usize), (usize, usize))> {
+        self.buffer
+            .selections()
+            .iter()
+            .map(|selection| {
+                let range = selection.range();
+                (
+                    self.buffer.row_col(range.start),
+                    self.buffer.row_col(range.end),
+                )
+            })
+            .collect()
+    }
+
     /// Zero-based row of the cursor.
     pub fn cursor_row(&self) -> usize {
         self.buffer.row_col(self.buffer.cursor()).0

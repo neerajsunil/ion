@@ -292,26 +292,17 @@ impl Workspace {
 }
 
 impl Workspace {
-    /// What a saved terminal ran. A harness that is no longer installed (or
-    /// a remote project) gets a shell instead.
+    /// What a saved terminal ran. A harness that is no longer installed gets
+    /// a shell instead.
     fn saved_launch(&self, shell: Option<&str>, harness: Option<&str>) -> Launch {
         let installed = harness
             .and_then(terminal::HarnessKind::from_command)
-            .filter(|_| self.filesystem.remote().is_none())
-            .and_then(|kind| {
-                terminal::available_harnesses()
-                    .into_iter()
-                    .find(|harness| harness.kind == kind)
-            });
+            .and_then(|kind| self.harnesses().into_iter().find(|h| h.kind == kind));
         if let Some(harness) = installed {
             return Launch::Agent(harness);
         }
         shell
-            .and_then(|name| {
-                terminal::available_shells()
-                    .into_iter()
-                    .find(|shell| shell.name == name)
-            })
+            .and_then(|name| self.shells().into_iter().find(|shell| shell.name == name))
             .map_or(Launch::Default, Launch::Shell)
     }
 }

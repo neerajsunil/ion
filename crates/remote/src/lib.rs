@@ -23,16 +23,20 @@ use sha2::{Digest, Sha256};
 mod askpass;
 mod auth;
 mod config;
+mod forward;
 mod mux;
 mod server;
 mod ssh;
 mod terminal;
+mod tools;
 mod trace;
 
 pub use askpass::askpass_main;
 pub use auth::{AuthPrompt, PromptField, Prompter};
 pub use config::{Config, Target};
-pub use terminal::{Terminal, TerminalEvent, TerminalSize};
+pub use forward::{Connector, Forward, LocalConnection, RemoteSocket};
+pub use terminal::{Program, Terminal, TerminalEvent, TerminalSize};
+pub use tools::RemoteTools;
 
 use auth::Secrets;
 use mux::{ChannelId, Event, Kind, Mux, Sink, Stream};
@@ -165,6 +169,8 @@ pub struct Connection {
     server: Mutex<Option<String>>,
     /// Searches in flight, for [`Connection::cancel_jobs`].
     jobs: Mutex<Vec<(Arc<Mux>, u64)>>,
+    /// Environment variables for terminals started from now on.
+    terminal_env: Mutex<Vec<(String, String)>>,
     this: Weak<Connection>,
 }
 
@@ -219,6 +225,7 @@ impl Connection {
             listeners: Mutex::new(Vec::new()),
             server: Mutex::new(None),
             jobs: Mutex::new(Vec::new()),
+            terminal_env: Mutex::new(Vec::new()),
             this: this.clone(),
         });
         let link = connection.open_link()?;
@@ -237,6 +244,16 @@ impl Connection {
     /// `user@host[:port]`.
     pub fn label(&self) -> String {
         self.target.label()
+    }
+
+    /// Sets environment variables every terminal started from now on gets,
+    /// e.g. the port agents use to reach Ion's IDE integration.
+    pub fn set_terminal_env(&self, vars: Vec<(String, String)>) {
+        *lock(&self.terminal_env) = vars;
+    }
+
+    pub(crate) fn terminal_env(&self) -> Vec<(String, String)> {
+        lock(&self.terminal_env).clone()
     }
 
     /// Where login questions go from now on (the window using the

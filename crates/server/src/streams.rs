@@ -1,5 +1,6 @@
-//! Client-opened streams: shell commands, terminals and file watchers, all multiplexed
-//! over the single stdio connection. Every thread blocks on a read; none polls.
+//! Client-opened streams: shell commands, terminals, file watchers and listeners for
+//! agents to reach the client, all multiplexed over the single stdio connection. Every
+//! thread blocks on a read; none polls.
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, Stdio};
@@ -9,10 +10,15 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 
-use remote_protocol::{PtySize, ServerMessage, StreamSpec, WatchEvent};
+use remote_protocol::{ListenSocket, PtySize, ServerMessage, StreamSpec, WatchEvent};
+
+use crate::listen::Listening;
 
 use crate::watch::Msg;
 use crate::{Output, send, send_data};
+
+/// Ends an accepted connection.
+type Shutdown = Arc<dyn Fn() + Send + Sync>;
 
 struct Handle {
     input: Option<Sender<Vec<u8>>>,
@@ -30,6 +36,8 @@ struct Running {
 pub struct Streams {
     output: Output,
     map: Arc<Mutex<HashMap<u64, Handle>>>,
+    /// Open `Listen` streams' sockets, by stream.
+    listeners: Arc<Mutex<HashMap<u64, Arc<Listening>>>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -84,6 +92,7 @@ impl Streams {
         Self {
             output,
             map: Arc::default(),
+            listeners: Arc::default(),
         }
     }
 
@@ -105,6 +114,8 @@ impl Streams {
                 ..
             } => self.spawn_pty(stream, &command, cwd.as_deref(), size),
             StreamSpec::Watch { root } => return self.watch(stream, root),
+            StreamSpec::Listen { socket } => return self.listen(stream, &socket),
+            StreamSpec::Accept { listener } => return self.accept(stream, listener),
         };
         match started {
             Ok(running) => self.register(stream, running),
@@ -314,6 +325,86 @@ impl Streams {
             match result {
                 Ok(()) => this.exit(stream, Some(0), None),
                 Err(error) => this.exit(stream, None, Some(error.to_string())),
+            }
+        });
+    }
+
+    fn listen(&self, stream: u64, socket: &ListenSocket) {
+        let listening = match Listening::bind(socket) {
+            Ok(listening) => Arc::new(listening),
+            Err(error) => return self.exit(stream, None, Some(error.to_string())),
+        };
+        let address = format!("{}\n", listening.address);
+        lock(&self.listeners).insert(stream, listening.clone());
+        let listeners = self.listeners.clone();
+        lock(&self.map).insert(
+            stream,
+            Handle {
+                input: None,
+                resize: None,
+                kill: Box::new(move || {
+                    lock(&listeners).remove(&stream);
+                    listening.close();
+                }),
+            },
+        );
+        let _ = send_data(&self.output, stream, false, address.as_bytes());
+    }
+
+    fn accept(&self, stream: u64, listener: u64) {
+        let Some(listening) = lock(&self.listeners).get(&listener).cloned() else {
+            return self.exit(stream, None, Some("Not listening".into()));
+        };
+        let (sender, receiver) = channel::<Vec<u8>>();
+        // Set once connected; closing the stream ends the connection.
+        let shutdown: Arc<Mutex<Option<Shutdown>>> = Arc::default();
+        let kill = shutdown.clone();
+        lock(&self.map).insert(
+            stream,
+            Handle {
+                input: Some(sender),
+                resize: None,
+                kill: Box::new(move || {
+                    if let Some(shutdown) = lock(&kill).take() {
+                        shutdown();
+                    }
+                }),
+            },
+        );
+        let this = self.clone();
+        thread::spawn(move || {
+            let accepted = match listening.accept() {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    lock(&this.map).remove(&stream);
+                    return this.exit(stream, None, Some(error.to_string()));
+                }
+            };
+            let end: Shutdown = Arc::from(accepted.shutdown);
+            *lock(&shutdown) = Some(end.clone());
+            // Closed while waiting: drop the connection.
+            if !lock(&this.map).contains_key(&stream) {
+                return end();
+            }
+            let mut writer = accepted.writer;
+            let shutdown_write = accepted.shutdown_write;
+            thread::spawn(move || {
+                for chunk in receiver {
+                    if writer
+                        .write_all(&chunk)
+                        .and_then(|()| writer.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                // The client is done sending.
+                shutdown_write();
+            });
+            pump(accepted.reader, this.output.clone(), stream, false);
+            end();
+            if lock(&this.map).remove(&stream).is_some() {
+                this.exit(stream, Some(0), None);
             }
         });
     }

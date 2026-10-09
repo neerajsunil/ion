@@ -76,7 +76,9 @@ impl Shortcuts {
         // Palette commands first, with their friendly names. Actions that
         // can't be built by name (like starting a specific agent) can't be
         // rebound.
-        for command in crate::commands::all_for_workspace(false, &settings::Settings::default()) {
+        for command in
+            crate::commands::all_for_workspace(false, &[], &settings::Settings::default())
+        {
             let name = command.action.name();
             if cx.build_action(name, None).is_err() || entries.iter().any(|e| e.name == name) {
                 continue;

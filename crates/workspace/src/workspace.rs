@@ -230,6 +230,11 @@ pub struct Workspace {
     pub(crate) remote_state: Option<remote::ConnectionState>,
     /// Login questions and state changes from the connection.
     pub(crate) remote_tasks: Vec<Task<()>>,
+    /// The server's shells and agents, once known (remote windows).
+    pub(crate) remote_tools: Option<remote::RemoteTools>,
+    /// How agents on the server reach Ion (remote windows).
+    pub(crate) remote_ide: Option<crate::ide::RemoteIde>,
+    pub(crate) remote_ide_task: Option<Task<()>>,
     pub(crate) file_tree: Option<Entity<FileTree>>,
     /// Every pane, by id. The trees below say where each one is.
     pub(crate) panes: HashMap<PaneId, Pane>,
@@ -406,6 +411,9 @@ impl Workspace {
             remote_watch: None,
             remote_state: None,
             remote_tasks: Vec::new(),
+            remote_tools: None,
+            remote_ide: None,
+            remote_ide_task: None,
             file_tree: None,
             panes,
             next_pane_id: 2,
@@ -539,6 +547,7 @@ impl Workspace {
         }
         self.save_session(cx);
         crate::ide::refresh_folders(cx);
+        self.start_remote_ide(window, cx);
         cx.notify();
     }
 
@@ -1069,11 +1078,15 @@ impl Workspace {
         }
         let index = self.file_index.clone();
         let remote = self.filesystem.remote().is_some();
+        let agents = self.harnesses().into_iter().map(|h| h.kind).collect();
         let recent = self.palette_recent_files(cx);
         let history = self.file_history(cx);
         let editor = self.active_editor();
-        let palette =
-            cx.new(|cx| Palette::new(index, recent, history, editor, prefix, remote, window, cx));
+        let palette = cx.new(|cx| {
+            Palette::new(
+                index, recent, history, editor, prefix, remote, agents, window, cx,
+            )
+        });
         let subscription =
             cx.subscribe_in(&palette, window, |this, _, event, window, cx| match event {
                 PaletteEvent::OpenFile(path, position) => {
@@ -1295,10 +1308,8 @@ impl Workspace {
     }
 
     fn new_agent(&mut self, action: &NewAgent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.filesystem.remote().is_some() {
-            return;
-        }
-        let Some(harness) = terminal::available_harnesses()
+        let Some(harness) = self
+            .harnesses()
             .into_iter()
             .find(|harness| harness.kind == action.0)
         else {

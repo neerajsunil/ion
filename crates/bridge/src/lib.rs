@@ -1,5 +1,6 @@
 //! The bridge to terminal agents: a local MCP server that harness IDE
-//! integrations connect to (Claude Code's `/ide`).
+//! integrations connect to (Claude Code's `/ide`), and the socket Codex's
+//! `/ide` asks for context (see [`codex`]).
 //!
 //! Ion listens on a random localhost port and writes a lock file under
 //! `~/.claude/ide/` naming the port, the open folders and a secret token.
@@ -11,8 +12,11 @@
 //! reading its socket. Nothing wakes while no agent talks. Pure logic with
 //! no UI dependencies; tool calls go to the UI through a channel.
 
+mod codex;
 mod mcp;
 mod ws;
+
+pub use codex::ContextRequest;
 
 use std::io::{self, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -35,6 +39,8 @@ pub enum IdeEvent {
     /// An agent connected or disconnected; how many are connected now.
     Connections(usize),
     Call(ToolCall),
+    /// Codex wants the active file, selection and open tabs.
+    Context(ContextRequest),
 }
 
 /// A tool call from an agent. Reply exactly once; dropping it unanswered
@@ -138,6 +144,7 @@ pub struct IdeServer {
     ide_name: String,
     lock_path: Option<PathBuf>,
     shared: Arc<Shared>,
+    codex: Option<codex::Listener>,
 }
 
 impl IdeServer {
@@ -162,8 +169,17 @@ impl IdeServer {
             ide_name: ide_name.to_owned(),
             lock_path: lock_dir().map(|dir| dir.join(format!("{port}.lock"))),
             shared,
+            codex: None,
         };
         Ok((server, receiver))
+    }
+
+    /// Also answers Codex's `/ide`. Fails when another editor already does.
+    pub fn listen_for_codex(&mut self) -> io::Result<()> {
+        if self.codex.is_none() {
+            self.codex = Some(codex::Listener::start(self.shared.events.clone())?);
+        }
+        Ok(())
     }
 
     pub fn port(&self) -> u16 {
@@ -192,18 +208,36 @@ impl IdeServer {
             .iter()
             .map(|folder| folder.to_string_lossy().into_owned())
             .collect();
-        let lock = json!({
-            "pid": std::process::id(),
-            "workspaceFolders": folders,
-            "ideName": self.ide_name,
-            "transport": "ws",
-            "runningInWindows": cfg!(windows),
-            "authToken": self.shared.token,
-        });
+        let lock = self.lock_file(&folders, std::process::id(), cfg!(windows));
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, lock.to_string())
+        std::fs::write(path, lock)
+    }
+
+    /// A lock file's contents, for these folders. On an SSH server, `pid` is
+    /// a process there that lives as long as the connection.
+    pub fn lock_file(&self, folders: &[String], pid: u32, windows: bool) -> String {
+        json!({
+            "pid": pid,
+            "workspaceFolders": folders,
+            "ideName": self.ide_name,
+            "transport": "ws",
+            "runningInWindows": windows,
+            "authToken": self.shared.token,
+        })
+        .to_string()
+    }
+
+    /// Opens connections for a Codex CLI on an SSH server, answered as if it
+    /// had connected here; its requests carry `origin`. Each call returns the
+    /// end to read Ion's replies from and the end to write the CLI's bytes to.
+    pub fn codex_connector(
+        &self,
+        origin: u64,
+    ) -> impl Fn() -> io::Result<(io::PipeReader, io::PipeWriter)> + Send + Sync + 'static {
+        let events = self.shared.events.clone();
+        move || codex::connect(events.clone(), origin)
     }
 
     /// Sends a notification (e.g. `selection_changed`) to every agent.

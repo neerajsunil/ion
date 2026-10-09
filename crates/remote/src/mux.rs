@@ -61,6 +61,10 @@ pub(crate) enum Kind {
     Watch {
         root: String,
     },
+    Listen(remote_protocol::ListenSocket),
+    Accept {
+        listener: ChannelId,
+    },
 }
 
 #[derive(Default)]
@@ -128,6 +132,8 @@ fn spec(kind: Kind) -> StreamSpec {
             merge_stderr,
         },
         Kind::Watch { root } => StreamSpec::Watch { root },
+        Kind::Listen(socket) => StreamSpec::Listen { socket },
+        Kind::Accept { listener } => StreamSpec::Accept { listener },
     }
 }
 
@@ -219,6 +225,8 @@ impl Mux {
             Kind::Exec { pty: Some(_), .. } => "terminal".to_owned(),
             Kind::Exec { command, .. } => trace::command(command),
             Kind::Watch { root } => format!("watch {root}"),
+            Kind::Listen(_) => "listen".to_owned(),
+            Kind::Accept { .. } => "accept".to_owned(),
         });
         // The link may have died between the check and the insert, after the
         // reader drained the streams.
