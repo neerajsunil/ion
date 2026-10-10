@@ -330,7 +330,7 @@ with tempfile.TemporaryDirectory(prefix="ion-ssh-fixture-") as temp:
     if WINDOWS:
         # If OpenSSH rejects the key file, show why (it falls back to a password otherwise).
         probe = subprocess.run(
-            ["ssh", "-v", "-o", "BatchMode=yes", "-F", str(ssh_dir / "config"), "-i", str(key_path),
+            ["ssh", "-v", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=NUL", "-F", str(ssh_dir / "config"), "-i", str(key_path),
              "-p", str(listener.getsockname()[1]), "dev@127.0.0.1", "exit"],
             capture_output=True, text=True, timeout=30,
         )
