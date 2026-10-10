@@ -118,7 +118,10 @@ with tempfile.TemporaryDirectory(prefix="ion-ssh-fixture-") as temp:
     key_path.write_bytes(Ed25519PrivateKey.generate().private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption()))
     # OpenSSH refuses keys readable by anyone but their owner.
     if WINDOWS:
-        subprocess.run(["icacls", str(key_path), "/inheritance:r", "/grant:r", f"{os.environ['USERNAME']}:R"], check=True, capture_output=True)
+        # Windows OpenSSH also wants the owner to be the user (or SYSTEM/Administrators).
+        user = subprocess.run(["whoami"], check=True, capture_output=True, text=True).stdout.strip()
+        subprocess.run(["icacls", str(key_path), "/setowner", user], check=True, capture_output=True)
+        subprocess.run(["icacls", str(key_path), "/inheritance:r", "/grant:r", f"{user}:F"], check=True, capture_output=True)
     else:
         key_path.chmod(0o600)
     identity = paramiko.Ed25519Key.from_private_key_file(str(key_path))
@@ -325,6 +328,17 @@ with tempfile.TemporaryDirectory(prefix="ion-ssh-fixture-") as temp:
             pass
         raise SystemExit(0)
     if WINDOWS:
+        # If OpenSSH rejects the key file, show why (it falls back to a password otherwise).
+        probe = subprocess.run(
+            ["ssh", "-v", "-o", "BatchMode=yes", "-F", str(ssh_dir / "config"), "-i", str(key_path),
+             "-p", str(listener.getsockname()[1]), "dev@127.0.0.1", "exit"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if probe.returncode != 0:
+            print(subprocess.run(["icacls", str(key_path)], capture_output=True, text=True).stdout, flush=True)
+            for line in probe.stderr.splitlines():
+                if any(word in line.lower() for word in ("key", "identity", "permission", "owner", "auth")):
+                    print("ssh:", line, flush=True)
         print("Note: terminal assertions are skipped on Windows (ion-server's pty support is Unix-only).", flush=True)
     try:
         result = subprocess.run(
